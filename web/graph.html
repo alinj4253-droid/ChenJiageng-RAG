@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>知识图谱可视化 - 嘉庚智答</title>
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            height: 100vh;
+        }
+
+        /* 左侧控制面板 */
+        .control-panel {
+            width: 280px;
+            background: #2d2d2d;
+            color: #fff;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+        }
+        .control-panel h1 {
+            font-size: 18px;
+            margin-bottom: 8px;
+        }
+        .control-panel p {
+            font-size: 12px;
+            color: #999;
+            margin-bottom: 20px;
+        }
+        .search-box {
+            margin-bottom: 16px;
+        }
+        .search-box input {
+            width: 100%;
+            padding: 10px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+        .legend {
+            margin-top: 20px;
+        }
+        .legend h3 {
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin: 6px 0;
+            font-size: 13px;
+        }
+        .legend-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .back-btn {
+            margin-top: auto;
+            padding: 10px;
+            background: #4a90d9;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            text-decoration: none;
+            text-align: center;
+        }
+
+        /* 右侧图谱区域 */
+        .graph-container {
+            flex: 1;
+            background: #1a1a2e;
+            position: relative;
+        }
+        #mynetwork {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* 节点详情弹窗 */
+        .node-detail {
+            position: absolute;
+            right: 20px;
+            top: 20px;
+            width: 280px;
+            background: rgba(255,255,255,0.95);
+            border-radius: 8px;
+            padding: 16px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            display: none;
+        }
+        .node-detail h3 {
+            font-size: 16px;
+            margin-bottom: 8px;
+            color: #333;
+        }
+        .node-detail .type {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 12px;
+        }
+        .node-detail .relations {
+            font-size: 13px;
+            color: #444;
+            line-height: 1.6;
+        }
+        .close-btn {
+            position: absolute;
+            right: 12px;
+            top: 12px;
+            cursor: pointer;
+            font-size: 18px;
+            color: #999;
+        }
+
+        /* 类型颜色配置 */
+        .type-PERSON { background: #ff6b6b; }
+        .type-ORG { background: #4ecdc4; }
+        .type-LOC { background: #ffd93d; }
+        .type-EVENT { background: #6c5ce7; }
+        .type-TIME { background: #a29bfe; }
+        .type-CONCEPT { background: #74b9ff; }
+        .type-OTHER { background: #95a5a6; }
+    </style>
+</head>
+<body>
+    <!-- 左侧控制面板 -->
+    <div class="control-panel">
+        <h1>知识图谱</h1>
+        <p>陈嘉庚文献知识图谱可视化</p>
+        
+        <div class="search-box">
+            <input type="text" id="searchInput" placeholder="搜索实体..." oninput="searchNode()">
+        </div>
+
+        <div class="legend">
+            <h3>实体类型</h3>
+            <div class="legend-item"><div class="legend-dot type-PERSON"></div>人物 (PERSON)</div>
+            <div class="legend-item"><div class="legend-dot type-ORG"></div>机构 (ORG)</div>
+            <div class="legend-item"><div class="legend-dot type-LOC"></div>地点 (LOC)</div>
+            <div class="legend-item"><div class="legend-dot type-EVENT"></div>事件 (EVENT)</div>
+            <div class="legend-item"><div class="legend-dot type-TIME"></div>时间 (TIME)</div>
+            <div class="legend-item"><div class="legend-dot type-CONCEPT"></div>概念 (CONCEPT)</div>
+        </div>
+
+        <a href="/" class="back-btn">← 返回聊天</a>
+    </div>
+
+    <!-- 右侧图谱区域 -->
+    <div class="graph-container">
+        <div id="mynetwork"></div>
+        <div class="node-detail" id="nodeDetail">
+            <span class="close-btn" onclick="closeDetail()">×</span>
+            <h3 id="detailName"></h3>
+            <div class="type" id="detailType"></div>
+            <div class="relations" id="detailRelations">
+                点击节点查看关联关系
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 节点颜色映射
+        const colorMap = {
+            "PERSON": "#ff6b6b",
+            "ORG": "#4ecdc4",
+            "LOC": "#ffd93d",
+            "EVENT": "#6c5ce7",
+            "TIME": "#a29bfe",
+            "CONCEPT": "#74b9ff",
+            "OTHER": "#95a5a6"
+        };
+
+        let network = null;
+        let nodes = null;
+        let edges = null;
+
+        // 从API加载图谱数据
+        async function loadGraphData(entityName) {
+            let url = '/api/graph?depth=2';
+            if (entityName) {
+                url += '&entity=' + encodeURIComponent(entityName);
+            }
+
+            const res = await fetch(url);
+            const data = await res.json();
+
+            if (!data.nodes || data.nodes.length === 0) {
+                alert('未找到实体「' + entityName + '」，请换个关键词试试');
+                return;
+            }
+
+            // 转换节点数据
+            const nodesArray = data.nodes.map(n => ({
+                id: n.id,
+                label: n.label,
+                group: n.group,
+                color: {
+                    background: colorMap[n.group] || "#95a5a6",
+                    border: "#fff",
+                    highlight: {
+                        background: colorMap[n.group] || "#95a5a6",
+                        border: "#fff"
+                    }
+                },
+                font: { color: "#fff", size: 15, face: "Microsoft YaHei" },
+                shape: "dot",
+                size: 25
+            }));
+
+            // 转换边数据
+            const edgesArray = data.edges.map(e => ({
+                from: e.from,
+                to: e.to,
+                label: e.label,
+                arrows: "to",
+                color: { color: "#555", highlight: "#4a90d9" },
+                font: { size: 12, color: "#aaa", background: "#1a1a2e" }
+            }));
+
+            // 更新数据集
+            nodes.clear();
+            edges.clear();
+            nodes.add(nodesArray);
+            edges.add(edgesArray);
+        }
+
+        // 初始化图谱
+        function initGraph() {
+            nodes = new vis.DataSet();
+            edges = new vis.DataSet();
+
+            const container = document.getElementById("mynetwork");
+            const data = { nodes, edges };
+            const options = {
+                layout: {
+                    improvedLayout: true
+                },
+                physics: {
+                    barnesHut: {
+                        gravitationalConstant: -3000,
+                        springLength: 150
+                    }
+                },
+                interaction: {
+                    hover: true,
+                    tooltipDelay: 200
+                }
+            };
+
+            network = new vis.Network(container, data, options);
+
+            // 节点点击事件
+            network.on("click", function(params) {
+                if (params.nodes.length > 0) {
+                    const nodeId = params.nodes[0];
+                    const node = nodes.get(nodeId);
+                    showNodeDetail(nodeId, node);
+                }
+            });
+
+            // 加载初始数据（不指定实体，返回中心节点）
+            loadGraphData();
+        }
+
+        // 显示节点详情
+        function showNodeDetail(nodeId, node) {
+            document.getElementById("detailName").textContent = node.label;
+            document.getElementById("detailType").textContent = node.group;
+            
+            // 查找关联关系
+            const allEdges = edges.get();
+            const relations = allEdges.filter(e => e.from === nodeId || e.to === nodeId);
+            let html = "";
+            relations.forEach(r => {
+                const otherId = r.from === nodeId ? r.to : r.from;
+                const otherNode = nodes.get(otherId);
+                if (otherNode) {
+                    if (r.from === nodeId) {
+                        html += `<div>→ ${r.label} → <b>${otherNode.label}</b></div>`;
+                    } else {
+                        html += `<div>← ${r.label} ← <b>${otherNode.label}</b></div>`;
+                    }
+                }
+            });
+            document.getElementById("detailRelations").innerHTML = html || "暂无关联";
+            document.getElementById("nodeDetail").style.display = "block";
+        }
+
+        function closeDetail() {
+            document.getElementById("nodeDetail").style.display = "none";
+        }
+
+        // 搜索节点
+        async function searchNode() {
+            const keyword = document.getElementById("searchInput").value.trim();
+            if (!keyword) return;
+            
+            // 加载该实体的子图
+            await loadGraphData(keyword);
+            
+            // 找到该节点的id（就是实体名本身）
+            const node = nodes.get(keyword);
+            if (node) {
+                // 聚焦到该节点
+                network.focus(keyword, { scale: 1.2, animation: true });
+                network.selectNodes([keyword]);
+                showNodeDetail(keyword, node);
+            }
+        }
+
+        // 页面加载完成后初始化
+        window.onload = function() {
+            initGraph();
+        };
+    </script>
+</body>
+</html>

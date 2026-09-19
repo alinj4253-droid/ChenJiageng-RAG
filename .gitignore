@@ -1,0 +1,38 @@
+# Python缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+
+# 大模型文件
+data/models/
+data/milvus/
+neo4j/
+
+# 数据文件（太大不入库）
+data/chunks/
+data/kg/
+data/clean/
+data/raw/
+data/test/
+data/vector_store/
+data/chat.db
+outputs/
+archive/
+
+# 个人文档
+AGENTS.md
+项目总结文档.md
+项目反思.md
+系统流程全链路说明.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
