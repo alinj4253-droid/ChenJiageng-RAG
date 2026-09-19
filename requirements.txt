@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+pydantic
+sqlalchemy
+pymilvus
+neo4j
+sentence-transformers
+torch
+jieba
+numpy
+requests
+openai
+markdown
+dompurify

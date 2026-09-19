@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.env
+data/models/
+data/milvus/
+data/chunks/
+data/kg/
+data/clean/
+data/raw/
+data/vector_store/
+data/chat.db
+outputs/
+neo4j/
+archive/
