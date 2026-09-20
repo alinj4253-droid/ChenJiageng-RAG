@@ -63,6 +63,12 @@ def _make_pipeline(use_graph=True, use_rerank=True, enable_routing=True,
     pipeline.evidence_judge.judge.return_value = EvidenceJudgement(
         sufficient=True, missing=[], reason="mock 充分"
     )
+
+    # 默认改写器返回 None（不因 mock 的 insufficient 意外触发重试）
+    pipeline.max_retry = 1
+    pipeline.query_rewriter = MagicMock()
+    pipeline.query_rewriter.rewrite.return_value = None
+
     return pipeline
 
 

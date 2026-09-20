@@ -10,6 +10,14 @@ from src.prompts import RAG_SYSTEM, RAG_USER
 from src.config import MAX_CONTEXT_CHUNKS, MAX_CONTEXT_CHARS
 
 
+# 证据最终不足时追加给生成器的谨慎指令
+CAUTION_NOTE = (
+    "\n\n注意：检索到的资料可能不足以完整回答该问题。"
+    "请只依据上述材料作答，不要编造材料中没有的事实；"
+    "若材料确实无法支撑答案，请明确说明现有语料中缺少相关信息。"
+)
+
+
 class RAGGenerator:
     """RAG问答生成器"""
 
@@ -46,7 +54,8 @@ class RAGGenerator:
         return '\n\n'.join(context_parts)
 
     def generate(self, query: str, chunks: List[Dict],
-                 query_analysis: Optional[Dict] = None) -> Dict:
+                 query_analysis: Optional[Dict] = None,
+                 caution: bool = False) -> Dict:
         """
         基于检索结果生成答案。
 
@@ -54,6 +63,7 @@ class RAGGenerator:
             query: 用户查询
             chunks: 检索到的chunk列表
             query_analysis: 查询分析结果（可选）
+            caution: 证据不足时为 True，要求模型谨慎作答、不得编造
 
         返回: {
             "answer": 生成的答案,
@@ -77,10 +87,12 @@ class RAGGenerator:
             query=query,
         )
 
+        system_content = RAG_SYSTEM + (CAUTION_NOTE if caution else "")
+
         # 调用LLM
         answer = self.client.chat(
             messages=[
-                {'role': 'system', 'content': RAG_SYSTEM},
+                {'role': 'system', 'content': system_content},
                 {'role': 'user', 'content': prompt},
             ],
             temperature=0.3,
@@ -112,10 +124,11 @@ class RAGGenerator:
 
     def generate_stream(self, query: str, chunks: List[Dict],
                         query_analysis: Optional[Dict] = None,
-                        history: list = None):
+                        history: list = None, caution: bool = False):
         """
         流式生成答案，yield (delta_text, references)
         history: 历史对话列表 [{"role":"user","content":"..."}, ...]
+        caution: 证据不足时为 True，要求模型谨慎作答、不得编造
         最后一次yield时references非空。
         """
         if not chunks:
@@ -127,7 +140,8 @@ class RAGGenerator:
         prompt = RAG_USER.format(context=context, query=query)
 
         # 拼接messages：system + 长期摘要 + 近期对话 + 当前问题
-        messages = [{'role': 'system', 'content': RAG_SYSTEM}]
+        messages = [{'role': 'system',
+                     'content': RAG_SYSTEM + (CAUTION_NOTE if caution else "")}]
         if history:
             # 提取长期记忆（system 角色的摘要消息，由 app.py 注入）
             summary_messages = [m for m in history if m.get('role') == 'system']

@@ -21,6 +21,7 @@ from src.reranker import Reranker
 from src.rag_generator import RAGGenerator
 from src.retrieval_router import build_plan, RetrievalPlan
 from src.evidence_judge import EvidenceJudge, EvidenceJudgement
+from src.query_rewriter import QueryRewriter, RewrittenQuery
 from src.config import (
     FINAL_TOP_K,
     RERANK_TOP_N,
@@ -32,6 +33,7 @@ from src.config import (
     KG_WEIGHT,
     ENABLE_AGENT_ROUTING,
     ENABLE_EVIDENCE_JUDGE,
+    MAX_RETRIEVAL_RETRY,
 )
 
 # 融合候选数：送入 rerank 前保留的候选规模
@@ -42,7 +44,9 @@ class RAGPipeline:
     """完整的RAG问答流水线"""
 
     def __init__(self, use_graph: bool = True, use_rerank: bool = True,
-                 enable_routing: Optional[bool] = None):
+                 enable_routing: Optional[bool] = None,
+                 enable_judge: Optional[bool] = None,
+                 max_retry: Optional[int] = None):
         print('初始化RAG Pipeline...')
         self.query_analyzer = QueryAnalyzer()
         self.hybrid_retriever = HybridRetriever()
@@ -60,9 +64,15 @@ class RAGPipeline:
 
         self.generator = RAGGenerator()
 
-        # 证据裁判（Agentic 决策点之二）；可全局关闭用于消融
-        self.enable_evidence_judge = ENABLE_EVIDENCE_JUDGE
-        self.evidence_judge = EvidenceJudge() if ENABLE_EVIDENCE_JUDGE else None
+        # 证据裁判（Agentic 决策点之二）；可全局/显式关闭用于消融
+        self.enable_evidence_judge = (
+            ENABLE_EVIDENCE_JUDGE if enable_judge is None else enable_judge
+        )
+        self.evidence_judge = EvidenceJudge() if self.enable_evidence_judge else None
+
+        # 查询改写器 + 有限重试上限（Agentic 决策点之三）
+        self.query_rewriter = QueryRewriter() if self.evidence_judge else None
+        self.max_retry = MAX_RETRIEVAL_RETRY if max_retry is None else max_retry
 
         # Agent 路由开关：显式参数优先，否则读全局配置（便于消融 Agent On/Off）
         self.enable_routing = (
@@ -171,20 +181,23 @@ class RAGPipeline:
                               latency: Optional[Dict] = None
                               ) -> Tuple[List[Dict], List[Dict]]:
         """对给定 query 执行：按 Plan 检索 → Weighted RRF 融合 → 精排。
-        Retry 时可对改写后的 query 重复调用。"""
+        Retry 时可对改写后的 query 重复调用，耗时在 latency 中累加。"""
         latency = latency if latency is not None else {}
 
         t2 = time.time()
         ranked_lists, graph_entities = self._retrieve_by_plan(query, analysis, plan)
-        latency['retrieval'] = time.time() - t2
+        latency['retrieval'] = latency.get('retrieval', 0.0) + (time.time() - t2)
 
         t3 = time.time()
         fused = self._fuse_ranked(ranked_lists, FUSION_CANDIDATES)
-        latency['fusion'] = time.time() - t3
+        latency['fusion'] = latency.get('fusion', 0.0) + (time.time() - t3)
 
         t4 = time.time()
         reranked, rerank_applied = self._rerank_by_plan(query, fused, plan)
-        latency['rerank'] = time.time() - t4 if rerank_applied else 0.0
+        if rerank_applied:
+            latency['rerank'] = latency.get('rerank', 0.0) + (time.time() - t4)
+        else:
+            latency.setdefault('rerank', 0.0)
 
         return reranked, graph_entities
 
@@ -195,8 +208,80 @@ class RAGPipeline:
             return None
         return self.evidence_judge.judge(question, contexts)
 
-    def _prepare_context(self, question: str) -> Tuple[List[Dict], Dict, RetrievalPlan, List[Dict], Dict]:
-        """查询分析 → 路由 → 检索 → 融合 → 精排（非流式路径共用）"""
+    def _retrieval_loop(self, question: str, analysis: Dict,
+                        plan: RetrievalPlan, latency: Dict):
+        """
+        检索 → 证据裁判 → （不足则）有限 Query Rewrite + Retry 的核心循环。
+
+        生成器，依次 yield：
+            ("status", str)   可供流式接口转发的进度状态
+            ("result", dict)  循环结束后的最终结果（仅一次，放在最后）
+
+        - 裁判始终针对用户原始问题；
+        - 重试保留原 analysis / plan，只替换检索 query；
+        - 最多重试 max_retry 次；
+        - 改写结果与历史查询重复时立即停止，杜绝死循环。
+        """
+        current_query = question
+        previous_queries = {question.strip()}
+        judgement: Optional[EvidenceJudgement] = None
+        retry_count = 0
+
+        yield ("status", "正在检索相关资料...")
+        contexts, graph_entities = self._retrieve_fuse_rerank(
+            current_query, analysis, plan, latency
+        )
+
+        while self.evidence_judge is not None and plan.use_evidence_judge:
+            yield ("status", "正在评估证据是否充分...")
+            t = time.time()
+            judgement = self.evidence_judge.judge(question, contexts)
+            latency['evidence_judge'] = latency.get('evidence_judge', 0.0) + (time.time() - t)
+
+            if judgement.sufficient:
+                break
+
+            # 证据不足：判断是否还能重试
+            if retry_count >= self.max_retry or self.query_rewriter is None:
+                break
+
+            yield ("status", "证据不足，正在改写查询并补充检索...")
+            t = time.time()
+            rewritten = self.query_rewriter.rewrite(
+                original_query=question,
+                current_query=current_query,
+                missing=judgement.missing,
+                contexts=contexts,
+            )
+            latency['query_rewrite'] = latency.get('query_rewrite', 0.0) + (time.time() - t)
+
+            # 改写失败 / 空查询 → 停止
+            if rewritten is None or not rewritten.query.strip():
+                break
+
+            new_query = rewritten.query.strip()
+            # 与当前或历史查询重复 → 直接停止，防止死循环
+            if new_query == current_query.strip() or new_query in previous_queries:
+                break
+
+            previous_queries.add(new_query)
+            current_query = new_query
+            retry_count += 1
+
+            yield ("status", "正在用改写后的查询补充检索...")
+            contexts, graph_entities = self._retrieve_fuse_rerank(
+                current_query, analysis, plan, latency
+            )
+
+        yield ("result", {
+            "contexts": contexts,
+            "graph_entities": graph_entities,
+            "judgement": judgement,
+            "retry_count": retry_count,
+        })
+
+    def _prepare_context(self, question: str) -> Tuple[List[Dict], Dict, RetrievalPlan, List[Dict], Dict, Optional[EvidenceJudgement], int]:
+        """查询分析 → 路由 → （检索-裁判-有限重试）循环（非流式路径共用）"""
         latency: Dict[str, float] = {}
 
         t1 = time.time()
@@ -204,11 +289,13 @@ class RAGPipeline:
         plan = self._resolve_plan(analysis)
         latency['query_analysis'] = time.time() - t1
 
-        reranked, graph_entities = self._retrieve_fuse_rerank(
-            question, analysis, plan, latency
-        )
+        outcome = {}
+        for kind, payload in self._retrieval_loop(question, analysis, plan, latency):
+            if kind == "result":
+                outcome = payload
 
-        return reranked, analysis, plan, graph_entities, latency
+        return (outcome["contexts"], analysis, plan, outcome["graph_entities"],
+                latency, outcome["judgement"], outcome["retry_count"])
 
     # ------------------------------------------------------------------
     # 非流式查询
@@ -229,23 +316,25 @@ class RAGPipeline:
             return cached
 
         t0 = time.time()
-        reranked, analysis, plan, graph_entities, latency = self._prepare_context(question)
+        reranked, analysis, plan, graph_entities, latency, judgement, retry_count = \
+            self._prepare_context(question)
 
         if verbose:
             print(f'[查询分析] 模式: {analysis.get("query_mode")}')
             print(f'[路由] 启用检索器: {plan.enabled_retrievers()} | 精排: {plan.use_rerank}')
             print(f'[图谱检索] 匹配实体: {[e["name"] for e in graph_entities]}')
+            if judgement:
+                print(f'[证据裁判] sufficient={judgement.sufficient} '
+                      f'missing={judgement.missing} | 重试 {retry_count} 次')
             print(f'[融合+精排] 最终上下文 {len(reranked)} 个chunk')
 
-        # 证据裁判（Phase 4 将扩展为有限 Query Rewrite + Retry 循环）
-        t5 = time.time()
-        judgement = self._judge_evidence(question, reranked, plan)
-        latency['evidence_judge'] = time.time() - t5 if judgement else 0.0
-        if verbose and judgement:
-            print(f'[证据裁判] sufficient={judgement.sufficient} missing={judgement.missing}')
+        # 证据最终仍不足时，要求生成器谨慎作答（不编造）
+        caution = judgement is not None and not judgement.sufficient
 
         t6 = time.time()
-        gen_result = self.generator.generate(question, reranked, analysis)
+        gen_result = self.generator.generate(
+            question, reranked, analysis, caution=caution
+        )
         latency['generation'] = time.time() - t6
         latency['total'] = time.time() - t0
 
@@ -257,7 +346,7 @@ class RAGPipeline:
             'retrieved_chunks': reranked,
             'evidence_judgement': judgement.to_dict() if judgement else None,
             'evidence_sufficient': judgement.sufficient if judgement else None,
-            'retry_count': 0,
+            'retry_count': retry_count,
             'answer': gen_result['answer'],
             'references': gen_result['references'],
             'latency': latency,
@@ -285,36 +374,30 @@ class RAGPipeline:
         plan = self._resolve_plan(analysis)
         latency['query_analysis'] = time.time() - t1
 
-        # 2. 按 Plan 多路检索
-        yield {"type": "status", "message": "正在检索相关资料..."}
-        t2 = time.time()
-        ranked_lists, graph_entities = self._retrieve_by_plan(question, analysis, plan)
-        latency['retrieval'] = time.time() - t2
+        # 2~4. 检索 → 证据裁判 → 有限改写重试（生成器，实时转发状态）
+        reranked = []
+        graph_entities = []
+        judgement = None
+        retry_count = 0
+        for kind, payload in self._retrieval_loop(question, analysis, plan, latency):
+            if kind == "status":
+                yield {"type": "status", "message": payload}
+            elif kind == "result":
+                reranked = payload["contexts"]
+                judgement = payload["judgement"]
+                retry_count = payload["retry_count"]
+                graph_entities = payload["graph_entities"]
         if graph_entities:
             yield {"type": "status",
                    "message": f"图谱匹配到 {len(graph_entities)} 个实体"}
 
-        # 3. 融合
-        t3 = time.time()
-        fused = self._fuse_ranked(ranked_lists, FUSION_CANDIDATES)
-        latency['fusion'] = time.time() - t3
-
-        # 4. 精排（按 Plan）
-        if plan.use_rerank and self.use_rerank and self.reranker.model is not None:
-            yield {"type": "status", "message": "正在精排结果..."}
-            t4 = time.time()
-            reranked = self.reranker.rerank(question, fused, top_k=FINAL_TOP_K)
-            latency['rerank'] = time.time() - t4
-        else:
-            reranked = fused[:FINAL_TOP_K]
-            latency['rerank'] = 0.0
-
-        # 5. 流式生成
+        # 5. 流式生成（证据最终不足时谨慎作答）
+        caution = judgement is not None and not judgement.sufficient
         yield {"type": "status", "message": "正在生成答案..."}
         t6 = time.time()
         references = []
         for delta, refs in self.generator.generate_stream(
-            question, reranked, analysis, history=history
+            question, reranked, analysis, history=history, caution=caution
         ):
             if refs is not None:
                 references = refs
@@ -329,6 +412,8 @@ class RAGPipeline:
             "latency": latency,
             "query_mode": analysis.get("query_mode"),
             "retrieval_plan": plan.to_dict(),
+            "evidence_sufficient": judgement.sufficient if judgement else None,
+            "retry_count": retry_count,
         }
 
 
