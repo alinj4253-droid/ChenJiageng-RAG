@@ -8,7 +8,9 @@ import numpy as np
 from pathlib import Path
 from typing import List, Dict, Set, Tuple
 
-from src.config import KG_DIR, GRAPH_TOP_K, GRAPH_EXPAND_DEPTH
+from src.config import (
+    KG_DIR, CHUNKS_DIR, GRAPH_TOP_K, GRAPH_EXPAND_DEPTH,
+)
 
 
 class GraphRetriever:
@@ -17,11 +19,36 @@ class GraphRetriever:
     def __init__(self):
         self.entities = {}       # name -> entity dict
         self.relations = []      # list of relation dicts
-        self.adj_list = {}       # entity -> [(relation, target_entity)]
-        self.entity_index = None # FAISS索引
-        self.entity_meta = []    # 索引元数据
+        self.adj_list = {}       # entity -> [(relation, target, direction)]
+        self.entity_index = None # FAISS 实体索引
+        self.entity_meta = []    # 实体索引元数据
+        self.relation_index = None  # FAISS 关系索引
+        self.relation_meta = []    # 关系索引元数据
+        self._embedding_model = None  # lazy 加载，进程内只加载一次
+        self.chunk_map = self._load_chunk_map()  # 启动时一次加载，避免每查询遍历文件
         self._load_kg()
         self._load_index()
+
+    def _load_chunk_map(self) -> Dict:
+        """启动时一次性加载 chunk_id -> chunk 内容映射（绝对路径，避免 cwd 隐患）"""
+        chunks_file = CHUNKS_DIR / 'chunks.jsonl'
+        chunk_map: Dict = {}
+        if not chunks_file.exists():
+            print(f'警告: chunks 文件不存在: {chunks_file}')
+            return chunk_map
+        with open(chunks_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                c = json.loads(line)
+                chunk_map[c['chunk_id']] = c
+        print(f'chunk_map 加载: {len(chunk_map)} 个 chunk')
+        return chunk_map
+
+    def _get_embedding_model(self):
+        """lazy 加载并缓存 embedding 模型，避免每次查询重复加载"""
+        if self._embedding_model is None:
+            from src.vector_store import load_embedding_model
+            self._embedding_model = load_embedding_model()
+        return self._embedding_model
 
     def _load_kg(self):
         """加载知识图谱"""
@@ -97,8 +124,7 @@ class GraphRetriever:
         # 2. 向量匹配（补充）
         if self.entity_index is not None and len(unique_matched) < top_k:
             try:
-                from src.vector_store import load_embedding_model
-                model = load_embedding_model()
+                model = self._get_embedding_model()
                 query_emb = model.encode([query])
                 query_emb = np.array(query_emb, dtype='float32')
                 query_emb = query_emb / np.linalg.norm(query_emb, axis=1, keepdims=True)
@@ -145,11 +171,29 @@ class GraphRetriever:
 
         return visited
 
+    def _materialize_chunk(self, chunk_id: str, score: float,
+                           source: str = 'graph',
+                           matched: int = 0) -> Dict:
+        """把 chunk_id 结合缓存的 chunk_map 物化为检索结果 dict；缺失返回 None"""
+        c = self.chunk_map.get(chunk_id)
+        if c is None:
+            return None
+        return {
+            'chunk_id': chunk_id,
+            'book': c['book'],
+            'chapter': c['chapter'],
+            'text': c['text'],
+            'score': float(score),
+            'char_count': c['char_count'],
+            'source': source,
+            'matched_entities': matched,
+        }
+
     def get_related_chunks(self, entities: Dict[str, float]) -> List[Dict]:
         """
         获取与实体集合相关的chunk。
         通过实体的source_chunks字段关联，用实体匹配分数加权。
-        
+
         Args:
             entities: {entity_name: match_score} 实体匹配分数
         """
@@ -167,28 +211,13 @@ class GraphRetriever:
         # 按加权分数排序
         sorted_chunks = sorted(chunk_scores.items(), key=lambda x: x[1], reverse=True)
 
-        # 读取chunk内容
-        chunks_file = Path('data/chunks/chunks.jsonl')
-        chunk_map = {}
-        with open(chunks_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                c = json.loads(line)
-                chunk_map[c['chunk_id']] = c
-
         results = []
         for chunk_id, score in sorted_chunks[:GRAPH_TOP_K * 2]:
-            if chunk_id in chunk_map:
-                c = chunk_map[chunk_id]
-                results.append({
-                    'chunk_id': chunk_id,
-                    'book': c['book'],
-                    'chapter': c['chapter'],
-                    'text': c['text'],
-                    'score': float(score),
-                    'char_count': c['char_count'],
-                    'source': 'graph',
-                    'matched_entities': len(entities),
-                })
+            chunk = self._materialize_chunk(
+                chunk_id, score, source='graph', matched=len(entities)
+            )
+            if chunk is not None:
+                results.append(chunk)
 
         return results
 
