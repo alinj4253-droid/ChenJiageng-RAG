@@ -141,13 +141,3 @@ QUERY_REWRITER_USER = """【原始问题】
 {evidence}
 
 请改写查询以召回缺失信息，严格输出 JSON。"""
-
-# ============ 评估 ============
-
-EVAL_FAITHFULNESS_SYSTEM = """你是一个RAG评估专家。请判断回答是否严格基于上下文材料，有无幻觉或编造。
-
-输出JSON：{{"score": 0-1的忠实度分数, "reason": "简短说明"}}"""
-
-EVAL_RELEVANCE_SYSTEM = """你是一个RAG评估专家。请判断回答与问题的相关程度。
-
-输出JSON：{{"score": 0-1的相关性分数, "reason": "简短说明"}}"""
