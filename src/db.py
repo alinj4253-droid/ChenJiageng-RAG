@@ -92,6 +92,25 @@ class DBManager:
             for m in messages
         ]
     
+    def build_chat_history(self, session_id: str, recent_window: int = 6) -> List[Dict]:
+        """
+        构建传给生成器的对话历史：长期摘要(system) + 最近 recent_window 条消息。
+
+        关键约束：必须在“存入本轮 user 消息之前”调用，
+        否则当前问题会同时出现在 history 和最终 prompt 中，造成重复。
+
+        返回: [{"role": "system"/"user"/"assistant", "content": ...}, ...]
+        """
+        history = []
+        summary = self.get_session_summary(session_id)
+        if summary:
+            history.append({"role": "system",
+                            "content": f"之前对话的摘要：{summary}"})
+        messages = self.get_session_messages(session_id)
+        for m in messages[-recent_window:]:
+            history.append({"role": m["role"], "content": m["content"]})
+        return history
+
     def add_message(self, session_id: str, role: str, content: str, sources: str = None):
         """添加一条消息"""
         # 更新session的updated_at

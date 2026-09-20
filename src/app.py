@@ -101,16 +101,12 @@ async def chat_stream(req: ChatRequest):
     if not session_id:
         session_id = db.create_session(req.message[:30])
 
-    # 1. 先存用户问题
-    db.add_message(session_id, "user", req.message)
+    # 1. 先取历史对话（必须在本轮用户消息入库之前），
+    #    否则当前问题会同时出现在 history 和最终 prompt 中，造成重复。
+    history = db.build_chat_history(session_id, recent_window=6)
 
-    # 2. 取历史对话
-    all_messages = db.get_session_messages(session_id)
-    history = []
-    summary = db.get_session_summary(session_id)
-    if summary:
-        history.append({"role": "system", "content": f"之前对话的摘要：{summary}"})
-    history.extend(all_messages[-6:])
+    # 2. 再存本轮用户问题
+    db.add_message(session_id, "user", req.message)
 
     # 全局任务状态表：key=session_id
     global running_tasks

@@ -79,3 +79,76 @@ class TestRollingSummary:
 
         assert db.get_session_summary(s1) == "摘要A"
         assert db.get_session_summary(s2) == ""
+
+
+class TestChatHistory:
+    """build_chat_history：保证当前问题不重复进入生成器"""
+
+    def test_history_excludes_current_query_before_insert(self, db):
+        """
+        历史 user A / assistant B，当前问题 C 尚未入库时构建 history：
+        history 只能包含 A、B，不能包含 C。
+        """
+        sid = db.create_session("t")
+        db.add_message(sid, "user", "A")
+        db.add_message(sid, "assistant", "B")
+
+        # 关键：在存入当前问题 C 之前构建历史
+        history = db.build_chat_history(sid)
+        contents = [m["content"] for m in history]
+
+        assert "C" not in contents
+        assert "A" in contents
+        assert "B" in contents
+
+    def test_current_query_appears_once_in_generator_messages(self, db):
+        """
+        模拟 app.py 的正确顺序：先取 history，再存当前问题。
+        最终送入生成器的 messages = history + [当前 prompt]，
+        当前问题 C 在整条 messages 中只能出现一次。
+        """
+        sid = db.create_session("t")
+        db.add_message(sid, "user", "历史问题A")
+        db.add_message(sid, "assistant", "历史回答B")
+
+        current_query = "当前问题C"
+
+        # 1. 入库前取历史
+        history = db.build_chat_history(sid)
+        # 2. 入库当前问题
+        db.add_message(sid, "user", current_query)
+
+        # 3. 生成器侧：history 之后再 append 包含当前问题的 prompt
+        generator_messages = list(history)
+        generator_messages.append({"role": "user", "content": f"上下文...\n问题：{current_query}"})
+
+        # 当前问题在 messages 中只应出现一次（最后的 prompt）
+        occurrences = sum(
+            1 for m in generator_messages if current_query in m["content"]
+        )
+        assert occurrences == 1
+
+    def test_history_includes_summary_as_system(self, db):
+        """存在摘要时，history 第一条为 system 摘要"""
+        sid = db.create_session("t")
+        db.update_session_summary(sid, "长期摘要")
+        db.add_message(sid, "user", "A")
+
+        history = db.build_chat_history(sid)
+        assert history[0]["role"] == "system"
+        assert "长期摘要" in history[0]["content"]
+
+    def test_history_respects_recent_window(self, db):
+        """recent_window 之外的旧消息不进入短期历史（应由摘要承载）"""
+        sid = db.create_session("t")
+        for i in range(10):
+            role = "user" if i % 2 == 0 else "assistant"
+            db.add_message(sid, role, f"msg-{i}")
+
+        history = db.build_chat_history(sid, recent_window=6)
+        # 不含摘要，所以 history 只有最近 6 条
+        contents = [m["content"] for m in history]
+        assert "msg-0" not in contents
+        assert "msg-9" in contents
+        assert len(history) == 6
+
