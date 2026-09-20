@@ -19,11 +19,11 @@
 
 | 能力 | 技术实现 |
 |---|---|
-| **三路混合检索** | BGE 向量语义检索（FAISS）+ BM25 关键词检索（jieba 分词）+ Neo4j 知识图谱多跳召回 |
+| **三路混合检索** | BGE 向量语义检索（FAISS）+ BM25 关键词检索（jieba 分词）+ 知识图谱子图扩展召回 |
 | **重排精排** | bge-reranker-base 交叉编码器对候选块二次排序，提升 Top-K 相关性 |
-| **知识图谱** | LLM 抽取实体-关系三元组，实体归一化后存入 Neo4j，支持 2 跳子图扩展 |
-| **RRF 融合** | 三路召回结果用 Reciprocal Rank Fusion 去重排序，权重可配 |
-| **多轮对话记忆** | 滑动窗口保留近 6 轮对话，超窗口自动 LLM 滚动摘要压缩 |
+| **知识图谱** | LLM 抽取实体-关系三元组，实体归一化后存入 Neo4j；在线检索通过语义实体匹配 + 两跳权重衰减子图扩展完成图增强召回 |
+| **Weighted RRF 融合** | 三路召回结果用 Reciprocal Rank Fusion 去重排序，向量/BM25/图谱三路权重可配 |
+| **多轮对话记忆** | 滑动窗口保留近 3 轮对话，超窗口自动 LLM 滚动摘要压缩为长期上下文 |
 | **流式输出** | SSE Server-Sent Events 打字机效果，后台异步生成，切换对话不打断 |
 | **图谱可视化** | vis-network 交互式知识图谱浏览，支持按实体展开邻居 |
 | **引用溯源** | 每个答案附带来源书名、章节与原文片段，可点击查看 |
@@ -64,7 +64,7 @@
 | **嵌入模型** | BAAI/bge-base-zh-v1.5（本地加载） |
 | **重排模型** | BAAI/bge-reranker-base（本地 Cross-Encoder） |
 | **关键词检索** | BM25 + jieba 中文分词 |
-| **知识图谱** | Neo4j 5.x（Bolt 协议） |
+| **知识图谱** | Neo4j 5.x（图谱持久化存储与可视化）；在线检索在 Python 内存中完成两跳子图扩展 |
 | **LLM** | DeepSeek-Chat API（OpenAI 兼容接口） |
 | **对话存储** | SQLite + SQLAlchemy ORM |
 | **前端** | 原生 HTML / JavaScript + vis-network + marked.js + DOMPurify |
@@ -80,11 +80,11 @@ ChenJiageng-RAG/
 │   ├── app.py                  # FastAPI 主入口（路由 + SSE 流式）
 │   ├── config.py               # 全局配置（路径、模型、超参数）
 │   ├── rag_pipeline.py         # RAG 主流水线（编排各模块）
-│   ├── query_analyzer.py      # 查询理解与改写
-│   ├── hybrid_retriever.py     # 向量 + BM25 混合检索
+│   ├── query_analyzer.py      # 查询意图识别与关键词提取
+│   ├── hybrid_retriever.py     # 向量 + BM25 混合检索（Weighted RRF）
 │   ├── vector_store.py        # FAISS 向量索引与检索
 │   ├── bm25_store.py          # BM25 索引与检索
-│   ├── graph_retriever.py      # Neo4j 图谱检索与子图扩展
+│   ├── graph_retriever.py      # 图谱实体匹配与两跳子图扩展
 │   ├── reranker.py             # Cross-Encoder 重排
 │   ├── rag_generator.py        # 答案生成（同步 + 流式）
 │   ├── llm_client.py           # LLM 客户端（DeepSeek / Ollama 降级）
@@ -235,10 +235,10 @@ python -m uvicorn src.app:app --host 0.0.0.0 --port 8000
 
 ## 🧠 关键技术点说明
 
-- **RRF 融合**：三路召回结果互不相识，用 Reciprocal Rank Fusion（k=60）将不同排序尺度的结果归一化融合，避免某一路分数碾压。
-- **实体归一化**：LLM 抽取的实体存在别名与指称差异，通过编辑距离 + 向量相似度聚类合并，再回写到三元组。
+- **Weighted RRF 融合**：三路召回结果互不相识，用 Reciprocal Rank Fusion（k=60）将不同排序尺度的结果归一化融合；各路权重（向量 0.5 / BM25 0.3 / 图谱 0.2）可在配置中调整，支持消融实验。
+- **实体归一化**：LLM 抽取的实体存在别名与指称差异，通过手动别名表 + 名称包含关系聚类合并，再回写到三元组。
 - **后台异步流式**：SSE 接口不直接在请求线程里生成，而是把生成任务放到 `asyncio.create_task`，前端通过轮询任务状态拉取增量 token——即使前端切走再回来，回答也不会中断。
-- **滚动摘要**：每满 6 轮对话，用 LLM 将旧对话压缩成 200 字摘要，注入下一轮 system prompt，控制上下文长度。
+- **滚动摘要记忆**：每满 6 轮对话，用 LLM 将旧对话压缩成 200 字摘要作为长期记忆注入 system prompt；最近 3 轮对话作为短期上下文保留，兼顾长对话连贯性与上下文长度控制。
 
 ---
 

@@ -3,7 +3,7 @@
 向量检索 + BM25检索 + RRF融合
 """
 from typing import List, Dict
-from src.config import HYBRID_TOP_K, RRF_K
+from src.config import HYBRID_TOP_K, RRF_K, VECTOR_WEIGHT, BM25_WEIGHT
 from src.vector_store import VectorRetriever
 from src.bm25_store import BM25Retriever
 
@@ -24,12 +24,12 @@ class HybridRetriever:
         vector_results = self.vector_retriever.search(query, top_k=top_k * 2)
         bm25_results = self.bm25_retriever.search(query, top_k=top_k * 2)
 
-        # RRF融合
+        # RRF融合（Weighted RRF：各路召回乘上配置权重）
         rrf_scores = {}  # chunk_id -> (score, result_dict)
 
         for rank, r in enumerate(vector_results):
             chunk_id = r['chunk_id']
-            rrf_score = 1.0 / (RRF_K + rank + 1)
+            rrf_score = VECTOR_WEIGHT / (RRF_K + rank + 1)
             if chunk_id in rrf_scores:
                 rrf_scores[chunk_id][0] += rrf_score
                 rrf_scores[chunk_id][1]['vector_score'] = r['score']
@@ -39,7 +39,7 @@ class HybridRetriever:
 
         for rank, r in enumerate(bm25_results):
             chunk_id = r['chunk_id']
-            rrf_score = 1.0 / (RRF_K + rank + 1)
+            rrf_score = BM25_WEIGHT / (RRF_K + rank + 1)
             if chunk_id in rrf_scores:
                 rrf_scores[chunk_id][0] += rrf_score
                 rrf_scores[chunk_id][1]['bm25_score'] = r['score']

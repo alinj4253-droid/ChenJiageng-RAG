@@ -1,11 +1,12 @@
 """
 RAG评估模块
-使用RAGAS指标评估检索和生成质量
+检索指标（Precision/Recall/F1/MRR）+ 生成质量（LLM-as-Judge）
+支持四组消融对比：纯向量 / 向量+BM25 / +图谱 / +Rerank
 """
 import json
 from pathlib import Path
 from typing import List, Dict
-from src.config import EVAL_DIR
+from src.config import TEST_DIR
 
 
 class RAGEvaluator:
@@ -18,7 +19,7 @@ class RAGEvaluator:
     def load_test_questions(self, filepath: str = None) -> List[Dict]:
         """加载测试问题集"""
         if filepath is None:
-            filepath = EVAL_DIR / 'test_questions.json'
+            filepath = TEST_DIR / 'eval_questions.json'
         if not Path(filepath).exists():
             print(f'测试问题文件不存在: {filepath}')
             return []
@@ -35,9 +36,8 @@ class RAGEvaluator:
 
         # 执行检索（不生成）
         query_analysis = self.pipeline.query_analyzer.analyze(question)
-        effective_query = query_analysis.get('rewritten_query', question)
 
-        hybrid = self.pipeline.hybrid_retriever.search(effective_query, top_k=10)
+        hybrid = self.pipeline.hybrid_retriever.search(question, top_k=10)
         retrieved_ids = [c['chunk_id'] for c in hybrid]
 
         # 计算指标
@@ -154,8 +154,8 @@ class RAGEvaluator:
                 }
 
         # 保存结果
-        EVAL_DIR.mkdir(parents=True, exist_ok=True)
-        with open(EVAL_DIR / 'evaluation_results.json', 'w', encoding='utf-8') as f:
+        TEST_DIR.mkdir(parents=True, exist_ok=True)
+        with open(TEST_DIR / 'evaluation_results.json', 'w', encoding='utf-8') as f:
             json.dump({'summary': summary, 'details': retrieval_metrics + generation_metrics},
                       f, ensure_ascii=False, indent=2)
 

@@ -135,13 +135,19 @@ class RAGGenerator:
 
         prompt = RAG_USER.format(context=context, query=effective_query)
 
-        # 拼接messages：system + 历史对话 + 当前用户问题
+        # 拼接messages：system + 长期摘要 + 近期对话 + 当前问题
         messages = [{'role': 'system', 'content': RAG_SYSTEM}]
         if history:
-            # 历史对话最多带最近1轮（2条消息），避免上下文过长
-            for msg in history[-2:]:
-                if msg['role'] in ('user', 'assistant'):
-                    messages.append({'role': msg['role'], 'content': msg['content']})
+            # 提取长期记忆（system 角色的摘要消息，由 app.py 注入）
+            summary_messages = [m for m in history if m.get('role') == 'system']
+            # 提取近期对话（user/assistant）
+            recent_turns = [m for m in history if m.get('role') in ('user', 'assistant')]
+            # 摘要拼接进 system prompt 作为长期记忆
+            for sm in summary_messages:
+                messages[0]['content'] += '\n\n' + sm['content']
+            # 最近 3 轮对话（6 条消息）作为短期上下文
+            for msg in recent_turns[-6:]:
+                messages.append({'role': msg['role'], 'content': msg['content']})
         messages.append({'role': 'user', 'content': prompt})
 
         # 流式调用LLM

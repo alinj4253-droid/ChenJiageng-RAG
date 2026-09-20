@@ -15,17 +15,17 @@ data/chunks/
 data/kg/
 data/clean/
 data/raw/
-data/test/
 data/vector_store/
 data/chat.db
 outputs/
 archive/
 
-# 个人文档
+# 个人工作文档
 AGENTS.md
 项目总结文档.md
 项目反思.md
 系统流程全链路说明.md
+改进方案.md
 
 # IDE
 .vscode/

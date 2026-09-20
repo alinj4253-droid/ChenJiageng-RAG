@@ -17,37 +17,37 @@ class QueryAnalyzer:
 
     def analyze(self, query: str) -> Dict:
         """
-        分析用户查询，返回结构化结果。
+        分析用户查询，做意图识别与关键词提取。
 
         返回: {
             "original_query": 原始查询,
-            "rewritten_query": 改写后的查询（更适合检索）,
-            "query_type": 事实型/解释型/比较型/列表型/开放型,
-            "entities": [识别到的实体],
-            "sub_queries": [子查询列表]（复杂查询才分解）,
-            "time_range": 时间范围（如有）,
+            "low_level_keywords": [低层关键词（具体实体/人名/地名）],
+            "high_level_keywords": [高层关键词（抽象主题/概念）],
+            "query_mode": "naive|local|global|hybrid",
+            "reason": "简短说明",
         }
         """
         prompt = QUERY_ANALYSIS_USER.format(query=query)
         result = self.client.extract_json(prompt, system_prompt=QUERY_ANALYSIS_SYSTEM)
 
         if not result:
-            # 降级：返回原始查询
+            # 降级：直接用原问题做混合检索
             return {
                 'original_query': query,
-                'rewritten_query': query,
-                'query_type': '开放型',
-                'entities': [],
-                'sub_queries': [query],
-                'time_range': None,
+                'low_level_keywords': [],
+                'high_level_keywords': [],
+                'query_mode': 'hybrid',
+                'reason': '',
             }
 
         result['original_query'] = query
-        # 确保sub_queries存在
-        if 'sub_queries' not in result or not result['sub_queries']:
-            result['sub_queries'] = [result.get('rewritten_query', query)]
-        if 'entities' not in result:
-            result['entities'] = []
+        # 补齐可能缺失的字段
+        if 'low_level_keywords' not in result:
+            result['low_level_keywords'] = []
+        if 'high_level_keywords' not in result:
+            result['high_level_keywords'] = []
+        if 'query_mode' not in result:
+            result['query_mode'] = 'hybrid'
 
         return result
 

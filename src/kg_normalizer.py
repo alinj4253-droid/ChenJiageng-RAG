@@ -116,15 +116,15 @@ def normalize_kg():
 
     print(f'读取 {len(raw_results)} 个chunk的抽取结果')
 
-    # 收集所有实体和关系（从triples格式提取）
+    # 收集所有实体和关系（从relations中提取）
     all_entities = {}  # name -> entity dict
     all_relations = []
     entity_chunk_map = defaultdict(set)  # name -> set of chunk_ids
 
     for result in raw_results:
         chunk_id = result.get('chunk_id', '')
-        # 从triples中提取实体和关系
-        for t in result.get('triples', []):
+        # 从relations中提取实体和关系
+        for t in result.get('relations', []):
             head = normalize_entity_name(t['head'])
             tail = normalize_entity_name(t['tail'])
             head_type = normalize_entity_type(t.get('head_type', 'OTHER'))

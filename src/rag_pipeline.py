@@ -10,7 +10,7 @@ from src.hybrid_retriever import HybridRetriever
 from src.graph_retriever import GraphRetriever
 from src.reranker import Reranker
 from src.rag_generator import RAGGenerator
-from src.config import FINAL_TOP_K
+from src.config import FINAL_TOP_K, KG_WEIGHT
 
 
 class RAGPipeline:
@@ -53,10 +53,10 @@ class RAGPipeline:
                 r['hybrid_score'] = r.get('rrf_score', r.get('score', 0))
                 rrf_scores[chunk_id] = [score, r]
 
-        # 图谱检索结果（权重1.0，和混合检索平权）
+        # 图谱检索结果（乘上 KG_WEIGHT，权重可配）
         for rank, r in enumerate(graph_results):
             chunk_id = r['chunk_id']
-            score = 1.0 / (60 + rank + 1)
+            score = KG_WEIGHT / (60 + rank + 1)
             if chunk_id in rrf_scores:
                 rrf_scores[chunk_id][0] += score
                 rrf_scores[chunk_id][1]['graph_score'] = r.get('score', 0)
@@ -109,9 +109,9 @@ class RAGPipeline:
             print(f'[查询分析] 类型: {query_analysis.get("query_type")}')
             print(f'[查询分析] 实体: {query_analysis.get("entities")}')
 
-        # 2. 混合检索
+        # 2. 混合检索（直接用原问题，查询分析仅做意图识别）
         t2 = time.time()
-        effective_query = query_analysis.get('rewritten_query', question)
+        effective_query = question
         hybrid_results = self.hybrid_retriever.search(effective_query, top_k=FINAL_TOP_K * 2)
         latency['hybrid_retrieval'] = time.time() - t2
         if verbose:
@@ -186,10 +186,10 @@ class RAGPipeline:
             query_analysis = self.query_analyzer.analyze(question)
         latency['query_analysis'] = time.time() - t1
 
-        # 2. 混合检索
+        # 2. 混合检索（直接用原问题）
         yield {"type": "status", "message": "正在检索相关资料..."}
         t2 = time.time()
-        effective_query = query_analysis.get('rewritten_query', question)
+        effective_query = question
         hybrid_results = self.hybrid_retriever.search(effective_query, top_k=FINAL_TOP_K * 2)
         latency['hybrid_retrieval'] = time.time() - t2
 
