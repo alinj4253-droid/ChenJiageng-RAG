@@ -94,6 +94,17 @@ class DBManager:
     
     def add_message(self, session_id: str, role: str, content: str, sources: str = None):
         """添加一条消息"""
+        # 更新session的updated_at
+        s = self.session.query(Session).filter(Session.session_id == session_id).first()
+
+        # 标题与计数判断必须在 add 新消息之前查询，
+        # 否则 SQLAlchemy 自动 flush 会把本条消息计入 count。
+        is_first_user_message = False
+        if s and role == "user":
+            count = self.session.query(Message).filter(Message.session_id == session_id).count()
+            if count == 0:
+                is_first_user_message = True
+
         msg = Message(
             session_id=session_id,
             role=role,
@@ -101,17 +112,13 @@ class DBManager:
             sources=sources
         )
         self.session.add(msg)
-        
-        # 更新session的updated_at
-        s = self.session.query(Session).filter(Session.session_id == session_id).first()
+
         if s:
             s.updated_at = datetime.now()
             # 如果是第一条用户消息，更新标题
-            if role == "user":
-                count = self.session.query(Message).filter(Message.session_id == session_id).count()
-                if count == 0:
-                    s.title = content[:30] + "..."
-        
+            if is_first_user_message:
+                s.title = content[:30] + "..."
+
         self.session.commit()
     
     def delete_session(self, session_id: str):
