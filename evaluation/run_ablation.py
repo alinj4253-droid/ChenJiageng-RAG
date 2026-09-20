@@ -61,7 +61,11 @@ def run_profile(profile: Dict, questions: List[Dict]) -> Dict:
         result = pipeline.query(question, verbose=False)
         wall = time.time() - t0
 
-        rm = retrieval_metrics(result.get("retrieved_chunks", []), item)
+        rm = retrieval_metrics(
+            result.get("retrieval_candidates")
+            or result.get("retrieved_chunks", []),
+            item,
+        )
         acc, acc_detail = answer_accuracy(result.get("answer", ""), item)
 
         latency = result.get("latency", {})

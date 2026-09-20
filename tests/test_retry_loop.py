@@ -46,8 +46,10 @@ def _make_loop_pipeline(max_retry=1, judge_responses=None, rewrite_responses=Non
     else:
         p.query_rewriter.rewrite.return_value = RewrittenQuery(query="改写后的查询")
 
-    # 检索（含融合/精排）整体 mock，返回 (contexts, graph_entities, candidate_count)
-    p._retrieve_fuse_rerank = MagicMock(return_value=([_chunk("c1")], [], 1))
+    # 检索（含融合/精排）整体 mock，返回 (reranked, graph_entities, fused_candidates)
+    p._retrieve_fuse_rerank = MagicMock(
+        return_value=([_chunk("c1")], [], [_chunk("c1")])
+    )
 
     # latency 累加需要的方法在真实实现里，这里整体 mock 掉检索即可
     return p
@@ -80,6 +82,8 @@ class TestBoundedRetry:
 
         assert outcome["retry_count"] == 0
         assert outcome["judgement"].sufficient is True
+        # 精排前候选一并透出，供检索 Recall@K 评估
+        assert outcome["candidate_count"] == len(outcome["candidates"]) == 1
         p._retrieve_fuse_rerank.assert_called_once()
         p.query_rewriter.rewrite.assert_not_called()
 
