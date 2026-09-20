@@ -20,6 +20,7 @@ from src.graph_retriever import GraphRetriever
 from src.reranker import Reranker
 from src.rag_generator import RAGGenerator
 from src.retrieval_router import build_plan, RetrievalPlan
+from src.evidence_judge import EvidenceJudge, EvidenceJudgement
 from src.config import (
     FINAL_TOP_K,
     RERANK_TOP_N,
@@ -30,6 +31,7 @@ from src.config import (
     BM25_WEIGHT,
     KG_WEIGHT,
     ENABLE_AGENT_ROUTING,
+    ENABLE_EVIDENCE_JUDGE,
 )
 
 # 融合候选数：送入 rerank 前保留的候选规模
@@ -57,6 +59,10 @@ class RAGPipeline:
             self.reranker = Reranker()
 
         self.generator = RAGGenerator()
+
+        # 证据裁判（Agentic 决策点之二）；可全局关闭用于消融
+        self.enable_evidence_judge = ENABLE_EVIDENCE_JUDGE
+        self.evidence_judge = EvidenceJudge() if ENABLE_EVIDENCE_JUDGE else None
 
         # Agent 路由开关：显式参数优先，否则读全局配置（便于消融 Agent On/Off）
         self.enable_routing = (
@@ -160,6 +166,35 @@ class RAGPipeline:
             return self.reranker.rerank(question, fused, top_k=FINAL_TOP_K), True
         return fused[:FINAL_TOP_K], False
 
+    def _retrieve_fuse_rerank(self, query: str, analysis: Dict,
+                              plan: RetrievalPlan,
+                              latency: Optional[Dict] = None
+                              ) -> Tuple[List[Dict], List[Dict]]:
+        """对给定 query 执行：按 Plan 检索 → Weighted RRF 融合 → 精排。
+        Retry 时可对改写后的 query 重复调用。"""
+        latency = latency if latency is not None else {}
+
+        t2 = time.time()
+        ranked_lists, graph_entities = self._retrieve_by_plan(query, analysis, plan)
+        latency['retrieval'] = time.time() - t2
+
+        t3 = time.time()
+        fused = self._fuse_ranked(ranked_lists, FUSION_CANDIDATES)
+        latency['fusion'] = time.time() - t3
+
+        t4 = time.time()
+        reranked, rerank_applied = self._rerank_by_plan(query, fused, plan)
+        latency['rerank'] = time.time() - t4 if rerank_applied else 0.0
+
+        return reranked, graph_entities
+
+    def _judge_evidence(self, question: str, contexts: List[Dict],
+                        plan: RetrievalPlan) -> Optional[EvidenceJudgement]:
+        """按 Plan / 全局开关决定是否做证据裁判；naive 模式不裁判"""
+        if self.evidence_judge is None or not plan.use_evidence_judge:
+            return None
+        return self.evidence_judge.judge(question, contexts)
+
     def _prepare_context(self, question: str) -> Tuple[List[Dict], Dict, RetrievalPlan, List[Dict], Dict]:
         """查询分析 → 路由 → 检索 → 融合 → 精排（非流式路径共用）"""
         latency: Dict[str, float] = {}
@@ -169,17 +204,9 @@ class RAGPipeline:
         plan = self._resolve_plan(analysis)
         latency['query_analysis'] = time.time() - t1
 
-        t2 = time.time()
-        ranked_lists, graph_entities = self._retrieve_by_plan(question, analysis, plan)
-        latency['retrieval'] = time.time() - t2
-
-        t3 = time.time()
-        fused = self._fuse_ranked(ranked_lists, FUSION_CANDIDATES)
-        latency['fusion'] = time.time() - t3
-
-        t4 = time.time()
-        reranked, rerank_applied = self._rerank_by_plan(question, fused, plan)
-        latency['rerank'] = time.time() - t4 if rerank_applied else 0.0
+        reranked, graph_entities = self._retrieve_fuse_rerank(
+            question, analysis, plan, latency
+        )
 
         return reranked, analysis, plan, graph_entities, latency
 
@@ -210,6 +237,13 @@ class RAGPipeline:
             print(f'[图谱检索] 匹配实体: {[e["name"] for e in graph_entities]}')
             print(f'[融合+精排] 最终上下文 {len(reranked)} 个chunk')
 
+        # 证据裁判（Phase 4 将扩展为有限 Query Rewrite + Retry 循环）
+        t5 = time.time()
+        judgement = self._judge_evidence(question, reranked, plan)
+        latency['evidence_judge'] = time.time() - t5 if judgement else 0.0
+        if verbose and judgement:
+            print(f'[证据裁判] sufficient={judgement.sufficient} missing={judgement.missing}')
+
         t6 = time.time()
         gen_result = self.generator.generate(question, reranked, analysis)
         latency['generation'] = time.time() - t6
@@ -221,6 +255,9 @@ class RAGPipeline:
             'query_mode': analysis.get('query_mode'),
             'retrieval_plan': plan.to_dict(),
             'retrieved_chunks': reranked,
+            'evidence_judgement': judgement.to_dict() if judgement else None,
+            'evidence_sufficient': judgement.sufficient if judgement else None,
+            'retry_count': 0,
             'answer': gen_result['answer'],
             'references': gen_result['references'],
             'latency': latency,

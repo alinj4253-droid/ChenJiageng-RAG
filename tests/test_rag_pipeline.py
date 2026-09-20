@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 from src.rag_pipeline import RAGPipeline
 from src.retrieval_router import build_plan
+from src.evidence_judge import EvidenceJudgement
 
 
 def _chunk(cid, text=None):
@@ -56,6 +57,12 @@ def _make_pipeline(use_graph=True, use_rerank=True, enable_routing=True,
         "answer": "这是mock的最终答案。",
         "references": [{"chunk_id": "d1"}],
     }
+
+    pipeline.enable_evidence_judge = True
+    pipeline.evidence_judge = MagicMock()
+    pipeline.evidence_judge.judge.return_value = EvidenceJudgement(
+        sufficient=True, missing=[], reason="mock 充分"
+    )
     return pipeline
 
 
@@ -187,3 +194,41 @@ class TestRoutingIntegration:
         p = _make_pipeline()
         p._analyze("陈嘉庚创办厦门大学的具体经过和历史背景是什么？")
         p.query_analyzer.analyze.assert_called_once()
+
+
+class TestEvidenceJudgeIntegration:
+    """证据裁判与 pipeline 的集成"""
+
+    def test_complex_question_invokes_judge(self):
+        """长问题（hybrid）会调用证据裁判，结果写入返回"""
+        p = _make_pipeline()
+        result = p.query("陈嘉庚创办厦门大学的具体经过和历史背景是什么？")
+        p.evidence_judge.judge.assert_called_once()
+        assert result["evidence_sufficient"] is True
+        assert result["evidence_judgement"]["sufficient"] is True
+
+    def test_naive_question_skips_judge(self):
+        """短问题（naive）不调用证据裁判"""
+        p = _make_pipeline()
+        result = p.query("陈嘉庚是谁")
+        p.evidence_judge.judge.assert_not_called()
+        assert result["evidence_judgement"] is None
+        assert result["evidence_sufficient"] is None
+
+    def test_judge_disabled_globally(self):
+        """全局关闭证据裁判 → 不调用"""
+        p = _make_pipeline()
+        p.enable_evidence_judge = False
+        p.evidence_judge = None
+        result = p.query("陈嘉庚创办厦门大学的具体经过和历史背景是什么？")
+        assert result["evidence_judgement"] is None
+
+    def test_insufficient_judgement_recorded(self):
+        """证据不足时，结果记录 insufficient 与 missing"""
+        p = _make_pipeline()
+        p.evidence_judge.judge.return_value = EvidenceJudgement(
+            sufficient=False, missing=["缺少创办经费来源"], reason="证据不足"
+        )
+        result = p.query("陈嘉庚创办厦门大学的具体经过和历史背景是什么？")
+        assert result["evidence_sufficient"] is False
+        assert "缺少创办经费来源" in result["evidence_judgement"]["missing"]

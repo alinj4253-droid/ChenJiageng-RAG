@@ -19,6 +19,7 @@ class RetrievalPlan:
     use_graph: bool = False
     use_relation: bool = False
     use_rerank: bool = False
+    use_evidence_judge: bool = False
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -39,29 +40,32 @@ class RetrievalPlan:
 
 # 各 query_mode 的固定路由策略
 _POLICY = {
-    # 简单事实查询：稠密 + 关键词即可，不引图谱、不精排，控制延迟与成本
+    # 简单事实查询：稠密 + 关键词即可，不引图谱、不精排、不做证据裁判，控制延迟与成本
     "naive": RetrievalPlan(
         use_dense=True,
         use_bm25=True,
         use_graph=False,
         use_relation=False,
         use_rerank=False,
+        use_evidence_judge=False,
     ),
-    # 围绕特定实体：稠密 + 实体图谱，精排
+    # 围绕特定实体：稠密 + 实体图谱，精排 + 证据裁判
     "local": RetrievalPlan(
         use_dense=True,
         use_bm25=False,
         use_graph=True,
         use_relation=False,
         use_rerank=True,
+        use_evidence_judge=True,
     ),
-    # 主题 / 全局问题：稠密 + 实体图谱 + 关系检索，精排
+    # 主题 / 全局问题：稠密 + 实体图谱 + 关系检索，精排 + 证据裁判
     "global": RetrievalPlan(
         use_dense=True,
         use_bm25=False,
         use_graph=True,
         use_relation=True,
         use_rerank=True,
+        use_evidence_judge=True,
     ),
     # 复杂混合问题：全部启用
     "hybrid": RetrievalPlan(
@@ -70,6 +74,7 @@ _POLICY = {
         use_graph=True,
         use_relation=True,
         use_rerank=True,
+        use_evidence_judge=True,
     ),
 }
 
