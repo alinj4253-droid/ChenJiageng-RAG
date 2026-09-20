@@ -28,6 +28,7 @@ from src.config import (
     RRF_K,
     VECTOR_TOP_K,
     BM25_TOP_K,
+    GRAPH_TOP_K,
     VECTOR_WEIGHT,
     BM25_WEIGHT,
     KG_WEIGHT,
@@ -135,12 +136,21 @@ class RAGPipeline:
             ranked_lists.append((bm25, BM25_WEIGHT, 'bm25'))
 
         if plan.use_graph and self.use_graph:
-            # 实体图谱检索；关系级检索（use_relation）在 Phase 6 接入，
-            # 当前图谱子图扩展本身已沿关系边遍历，可覆盖部分关系需求。
+            # 实体图谱检索：实体匹配 + 双向子图扩展 + 关联 chunk 召回
             graph_result = self.graph_retriever.search(query)
             graph_chunks = graph_result.get('chunks', [])
             graph_entities = graph_result.get('entities', [])
             ranked_lists.append((graph_chunks, KG_WEIGHT, 'graph'))
+
+        if plan.use_relation and self.use_graph:
+            # 关系检索：high-level 抽象关键词走关系向量索引；
+            # 无 high-level 关键词时回退用原始 query
+            rel_query = " ".join(analysis.get('high_level_keywords', [])) or query
+            rel_chunks = self.graph_retriever.relation_chunks(
+                rel_query, top_k=GRAPH_TOP_K
+            )
+            if rel_chunks:
+                ranked_lists.append((rel_chunks, KG_WEIGHT, 'graph_relation'))
 
         return ranked_lists, graph_entities
 

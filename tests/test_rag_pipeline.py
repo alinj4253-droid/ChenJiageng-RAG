@@ -47,6 +47,8 @@ def _make_pipeline(use_graph=True, use_rerank=True, enable_routing=True,
             "expanded_entities": [],
             "chunks": graph_chunks if graph_chunks is not None else [_chunk("g1")],
         }
+        # 关系检索默认无结果，避免 MagicMock 被当作可迭代结果
+        pipeline.graph_retriever.relation_chunks.return_value = []
 
     if use_rerank:
         pipeline.reranker = MagicMock()
@@ -161,6 +163,26 @@ class TestRoutingIntegration:
         names = [name for _, _, name in ranked]
         assert "dense" in names and "graph" in names
         assert "bm25" not in names
+
+    def test_global_calls_relation_retrieval_with_high_level_keywords(self):
+        p = _make_pipeline()
+        plan = build_plan({"query_mode": "global"})
+        p.graph_retriever.relation_chunks.return_value = [_chunk("r1")]
+        analysis = {"low_level_keywords": [],
+                    "high_level_keywords": ["教育", "救国"],
+                    "query_mode": "global"}
+        ranked, _ = p._retrieve_by_plan("陈嘉庚教育救国思想", analysis, plan)
+        names = [name for _, _, name in ranked]
+        assert "graph_relation" in names
+        # 关系检索查询由 high-level 关键词拼接而成
+        rel_query = p.graph_retriever.relation_chunks.call_args[0][0]
+        assert "教育" in rel_query and "救国" in rel_query
+
+    def test_local_does_not_call_relation_retrieval(self):
+        p = _make_pipeline()
+        plan = build_plan({"query_mode": "local"})
+        p._retrieve_by_plan("q", self._analysis("local"), plan)
+        p.graph_retriever.relation_chunks.assert_not_called()
 
     def test_hybrid_enables_all(self):
         p = _make_pipeline()

@@ -4,6 +4,8 @@ GraphRetriever 测试（轻量构造，不加载真实 faiss / 大数据）
 Phase 6 Commit 1：embedding lazy 缓存 + chunk_map 启动加载
 Phase 6 Commit 2：双向邻接表 + relation 索引检索
 """
+import json
+import numpy as np
 from unittest.mock import MagicMock, patch
 
 from src.graph_retriever import GraphRetriever
@@ -67,3 +69,87 @@ class TestEmbeddingLazyCache:
         assert first == "MODEL" and second == "MODEL"
         # 两次调用只真正加载一次
         mock_load.assert_called_once()
+
+
+class TestBidirectionalGraph:
+
+    def _load_small_kg(self, tmp_path, monkeypatch):
+        import src.graph_retriever as gr
+        monkeypatch.setattr(gr, "KG_DIR", tmp_path)
+        (tmp_path / "entities.jsonl").write_text(
+            json.dumps({"name": "陈嘉庚", "type": "PER", "source_chunks": []},
+                       ensure_ascii=False) + "\n" +
+            json.dumps({"name": "厦门大学", "type": "ORG", "source_chunks": []},
+                       ensure_ascii=False) + "\n",
+            encoding="utf-8")
+        (tmp_path / "triples.jsonl").write_text(
+            json.dumps({"head": "陈嘉庚", "relation": "创办", "tail": "厦门大学",
+                        "source_chunks": ["c1"]}, ensure_ascii=False) + "\n",
+            encoding="utf-8")
+        g = GraphRetriever.__new__(GraphRetriever)
+        g.entities, g.relations, g.adj_list = {}, [], {}
+        g._load_kg()
+        return g
+
+    def test_adjlist_is_bidirectional_with_direction(self, tmp_path, monkeypatch):
+        g = self._load_small_kg(tmp_path, monkeypatch)
+
+        outgoing = {n["neighbor"]: n for n in g.get_neighbors("陈嘉庚")}
+        assert outgoing["厦门大学"]["direction"] == "outgoing"
+        assert outgoing["厦门大学"]["relation"] == "创办"
+
+        incoming = {n["neighbor"]: n for n in g.get_neighbors("厦门大学")}
+        assert incoming["陈嘉庚"]["direction"] == "incoming"
+        assert incoming["陈嘉庚"]["relation"] == "创办"
+
+    def test_expand_can_walk_incoming_edges(self, tmp_path, monkeypatch):
+        g = self._load_small_kg(tmp_path, monkeypatch)
+        # 从尾实体出发，沿 incoming 边也能扩展回头实体
+        visited = g.expand_subgraph(["厦门大学"], depth=1)
+        assert "陈嘉庚" in visited
+
+
+class TestRelationRetrieval:
+
+    def _graph_with_relation_index(self):
+        g = _make_graph()
+        g.relations = [
+            {"head": "陈嘉庚", "relation": "创办", "tail": "厦门大学",
+             "source_chunks": ["c1"]},
+            {"head": "无关", "relation": "位于", "tail": "某地",
+             "source_chunks": ["c2"]},
+        ]
+        fake_index = MagicMock()
+        # 第 0 条相似 0.9（保留），第 1 条 0.3（低于阈值过滤）
+        fake_index.search.return_value = (
+            np.array([[0.9, 0.3]], dtype="float32"),
+            np.array([[0, 1]]),
+        )
+        g.relation_index = fake_index
+        g._embedding_model = MagicMock()
+        g._embedding_model.encode.return_value = np.ones((1, 8))
+        return g
+
+    def test_search_relations_threshold_and_fields(self):
+        g = self._graph_with_relation_index()
+        rels = g.search_relations("陈嘉庚的教育救国理念")
+        assert len(rels) == 1
+        assert rels[0]["head"] == "陈嘉庚"
+        assert rels[0]["tail"] == "厦门大学"
+        assert rels[0]["source_chunks"] == ["c1"]
+
+    def test_relation_chunks_materialize_source(self):
+        g = self._graph_with_relation_index()
+        chunks = g.relation_chunks("教育救国")
+        assert [c["chunk_id"] for c in chunks] == ["c1"]
+        assert chunks[0]["source"] == "graph_relation"
+
+    def test_no_relation_index_returns_empty(self):
+        g = _make_graph()
+        g.relation_index = None
+        assert g.search_relations("q") == []
+        assert g.relation_chunks("q") == []
+
+    def test_empty_query_returns_empty(self):
+        g = self._graph_with_relation_index()
+        assert g.search_relations("") == []

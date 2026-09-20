@@ -105,6 +105,8 @@ KG_MAX_RELATIONS_PER_CHUNK = 15
 # ============ 图谱检索配置 ============
 GRAPH_TOP_K = 10              # 图谱检索返回chunk数
 GRAPH_EXPAND_DEPTH = 2        # 子图扩展深度
+GRAPH_ENTITY_SIM_THRESHOLD = 0.5    # 实体向量匹配相似度阈值
+GRAPH_RELATION_SIM_THRESHOLD = 0.5  # 关系向量检索相似度阈值
 
 # ============ Agentic RAG 配置 ============
 ENABLE_AGENT_ROUTING = True       # 是否启用查询模式路由（关闭则所有查询走全量检索）

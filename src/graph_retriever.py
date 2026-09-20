@@ -10,6 +10,8 @@ from typing import List, Dict, Set, Tuple
 
 from src.config import (
     KG_DIR, CHUNKS_DIR, GRAPH_TOP_K, GRAPH_EXPAND_DEPTH,
+    KG_RELATION_TOP_K, GRAPH_ENTITY_SIM_THRESHOLD,
+    GRAPH_RELATION_SIM_THRESHOLD,
 )
 
 
@@ -65,16 +67,18 @@ class GraphRetriever:
                 for line in f:
                     r = json.loads(line)
                     self.relations.append(r)
-                    # 构建邻接表
-                    head = r['head']
-                    if head not in self.adj_list:
-                        self.adj_list[head] = []
-                    self.adj_list[head].append((r['relation'], r['tail']))
+                    head, tail, rel = r['head'], r['tail'], r['relation']
+                    # 双向邻接表：正向 head -> tail（outgoing），反向 tail -> head（incoming），
+                    # 保留 relation direction 不丢失语义
+                    self.adj_list.setdefault(head, []).append(
+                        (rel, tail, 'outgoing'))
+                    self.adj_list.setdefault(tail, []).append(
+                        (rel, head, 'incoming'))
 
         print(f'图谱加载: {len(self.entities)} 实体, {len(self.relations)} 关系')
 
     def _load_index(self):
-        """加载实体向量索引"""
+        """加载实体向量索引与关系向量索引"""
         index_file = KG_DIR / 'entity_index.faiss'
         if index_file.exists():
             import faiss
@@ -84,6 +88,17 @@ class GraphRetriever:
                 for line in f:
                     self.entity_meta.append(json.loads(line))
             print(f'实体索引加载: {self.entity_index.ntotal} 个向量')
+
+        rel_index_file = KG_DIR / 'relation_index.faiss'
+        if rel_index_file.exists():
+            import faiss
+            self.relation_index = faiss.read_index(str(rel_index_file))
+            rel_meta_file = KG_DIR / 'relation_meta.jsonl'
+            if rel_meta_file.exists():
+                with open(rel_meta_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        self.relation_meta.append(json.loads(line))
+            print(f'关系索引加载: {self.relation_index.ntotal} 个向量')
 
     def match_entities(self, query: str, top_k: int = 5) -> List[Dict]:
         """
@@ -161,7 +176,7 @@ class GraphRetriever:
             next_frontier = []
             for entity in frontier:
                 if entity in self.adj_list:
-                    for _, target in self.adj_list[entity]:
+                    for _, target, _ in self.adj_list[entity]:
                         if target not in visited:
                             visited.add(target)
                             next_frontier.append(target)
@@ -170,6 +185,16 @@ class GraphRetriever:
                 break
 
         return visited
+
+    def get_neighbors(self, entity: str) -> List[Dict]:
+        """
+        返回实体的全部邻居（双向），每条带关系方向：
+            {"neighbor": 对端实体, "relation": 关系, "direction": "outgoing"/"incoming"}
+        """
+        return [
+            {"neighbor": target, "relation": rel, "direction": direction}
+            for rel, target, direction in self.adj_list.get(entity, [])
+        ]
 
     def _materialize_chunk(self, chunk_id: str, score: float,
                            source: str = 'graph',
@@ -221,6 +246,72 @@ class GraphRetriever:
 
         return results
 
+    # ------------------------------------------------------------------
+    # 关系检索（relation index）：high-level 抽象问题 → 关系语义匹配
+    # ------------------------------------------------------------------
+    def search_relations(self, query_text: str,
+                         top_k: int = KG_RELATION_TOP_K,
+                         score_threshold: float = GRAPH_RELATION_SIM_THRESHOLD
+                         ) -> List[Dict]:
+        """
+        用关系向量索引检索与 query_text 最相关的三元组。
+        FAISS relation index 的第 i 个向量与 self.relations[i]（triples.jsonl
+        逐行）一一对应，因此可直接取回带 source_chunks 的完整关系记录。
+        """
+        if self.relation_index is None or not query_text:
+            return []
+        try:
+            model = self._get_embedding_model()
+            emb = model.encode([query_text])
+            emb = np.array(emb, dtype='float32')
+            emb = emb / np.linalg.norm(emb, axis=1, keepdims=True)
+            scores, indices = self.relation_index.search(emb, top_k)
+        except Exception as e:
+            print(f'关系向量检索失败: {e}')
+            return []
+
+        results = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx < 0 or idx >= len(self.relations):
+                continue
+            if score < score_threshold:
+                continue
+            r = self.relations[idx]
+            results.append({
+                'head': r['head'],
+                'relation': r['relation'],
+                'tail': r['tail'],
+                'description': r.get('description', ''),
+                'score': float(score),
+                'source_chunks': r.get('source_chunks', []),
+            })
+        return results
+
+    def relation_chunks(self, query_text: str,
+                        top_k: int = GRAPH_TOP_K) -> List[Dict]:
+        """
+        关系检索 → 聚合命中关系的 source_chunks（按关系相似度加权）→ 物化 chunk。
+        供 global / hybrid 模式在实体邻居之外补充关系语义证据。
+        """
+        rels = self.search_relations(query_text)
+        if not rels:
+            return []
+
+        chunk_scores: Dict[str, float] = {}
+        for rel in rels:
+            for cid in rel.get('source_chunks', []):
+                chunk_scores[cid] = chunk_scores.get(cid, 0.0) + rel['score']
+
+        ordered = sorted(chunk_scores.items(), key=lambda x: x[1], reverse=True)
+        results = []
+        for chunk_id, score in ordered[:top_k]:
+            chunk = self._materialize_chunk(
+                chunk_id, score, source='graph_relation', matched=len(rels)
+            )
+            if chunk is not None:
+                results.append(chunk)
+        return results
+
     def expand_subgraph_weighted(self, seed_entities: List[Dict], depth: int = GRAPH_EXPAND_DEPTH) -> Dict[str, float]:
         """
         从种子实体出发，扩展子图（BFS），带权重衰减。
@@ -241,7 +332,7 @@ class GraphRetriever:
                 if entity not in self.adj_list:
                     continue
                 current_score = entity_scores.get(entity, 0)
-                for _, target in self.adj_list[entity]:
+                for _, target, _ in self.adj_list[entity]:
                     if target not in entity_scores:
                         # 新扩展的实体，分数衰减
                         entity_scores[target] = current_score * decay_factor
