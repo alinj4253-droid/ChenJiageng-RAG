@@ -120,6 +120,12 @@ async def chat_stream(req: ChatRequest):
         "done": False
     }
 
+    # 增量滚动摘要器（复用 pipeline 的 LLM 客户端）
+    from src.memory_manager import RollingSummaryManager
+    memory_manager = RollingSummaryManager(
+        db, client=pipeline.generator.client, recent_window=6
+    )
+
     # 后台生成协程：不依赖前端连接，生成完自动存库
     async def background_generate():
         full_answer = ""
@@ -136,20 +142,11 @@ async def chat_stream(req: ChatRequest):
             db.add_message(session_id, "assistant", full_answer, sources=json.dumps(refs, ensure_ascii=False))
             running_tasks[session_id]["status"] = "done"
             running_tasks[session_id]["done"] = True
-            # 触发摘要
-            total_msgs = len(db.get_session_messages(session_id))
-            if total_msgs > 6 and total_msgs % 6 == 0:
-                all_old = db.get_session_messages(session_id)
-                to_summarize = []
-                if summary:
-                    to_summarize.append(f"已有摘要：{summary}")
-                for m in all_old[:6]:
-                    to_summarize.append(f"{m['role']}: {m['content'][:200]}")
-                new_summary = pipeline.generator.client.chat(
-                    messages=[{"role": "user", "content": f"把以下对话总结成200字以内的核心要点，只输出摘要：\n" + "\n".join(to_summarize)}],
-                    temperature=0.1, max_tokens=300,
-                )
-                db.update_session_summary(session_id, new_summary)
+            # 增量滚动摘要：只摘要已滑出 recent window、且尚未摘要过的消息
+            try:
+                memory_manager.maybe_summarize(session_id)
+            except Exception as summary_err:
+                print(f"[memory] 滚动摘要失败（不影响主流程）: {summary_err}")
         except Exception as e:
             running_tasks[session_id]["status"] = "error"
             running_tasks[session_id]["error"] = str(e)

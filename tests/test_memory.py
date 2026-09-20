@@ -152,3 +152,80 @@ class TestChatHistory:
         assert "msg-9" in contents
         assert len(history) == 6
 
+
+class TestIncrementalSummaryWindow:
+    """get_pending_summary_messages 的增量窗口逻辑"""
+
+    def _fill(self, db, sid, n):
+        """在现有消息基础上追加到共 n 条（幂等，不重复插入）"""
+        existing = len(db.get_session_messages(sid))
+        for i in range(existing + 1, n + 1):
+            role = "user" if i % 2 == 1 else "assistant"
+            db.add_message(sid, role, f"msg-{i}")
+
+    def test_no_pending_within_recent_window(self, db):
+        """消息数未超过 recent window → 无待摘要消息"""
+        sid = db.create_session("t")
+        self._fill(db, sid, 6)
+        pending, last_id = db.get_pending_summary_messages(sid, recent_window=6)
+        assert pending == []
+        assert last_id is None
+
+    def test_first_summary_covers_messages_slid_out(self, db):
+        """
+        8 条消息、recent_window=6：
+        最近 6 条（3~8）保留原文，前 2 条（1~2）滑出窗口待摘要。
+        """
+        sid = db.create_session("t")
+        self._fill(db, sid, 8)
+        pending, last_id = db.get_pending_summary_messages(sid, recent_window=6)
+
+        contents = [m["content"] for m in pending]
+        assert contents == ["msg-1", "msg-2"]
+        assert last_id == pending[-1]["id"]
+
+    def test_recent_window_not_summarized_early(self, db):
+        """recent window 内的消息绝不出现在待摘要列表"""
+        sid = db.create_session("t")
+        self._fill(db, sid, 7)  # 只有 msg-1 滑出
+        pending, _ = db.get_pending_summary_messages(sid, recent_window=6)
+        contents = [m["content"] for m in pending]
+        assert contents == ["msg-1"]
+
+    def test_no_duplicate_after_cursor_advanced(self, db):
+        """
+        第一次摘要覆盖 1~2 后推进游标；
+        增长到 10 条消息时，第二次只摘要 3~4，不再包含 1~2。
+        """
+        sid = db.create_session("t")
+        self._fill(db, sid, 8)
+
+        # 第一次摘要
+        pending1, last1 = db.get_pending_summary_messages(sid, recent_window=6)
+        assert [m["content"] for m in pending1] == ["msg-1", "msg-2"]
+        db.update_session_summary(sid, "摘要(1-2)", until_message_id=last1)
+
+        # 又新增 2 条 → 共 10 条
+        self._fill(db, sid, 10)
+        pending2, last2 = db.get_pending_summary_messages(sid, recent_window=6)
+        contents2 = [m["content"] for m in pending2]
+
+        # 不得再次包含已摘要的 1~2
+        assert "msg-1" not in contents2
+        assert "msg-2" not in contents2
+        assert contents2 == ["msg-3", "msg-4"]
+        assert last2 > last1
+
+    def test_cursor_persisted(self, db):
+        """摘要游标随会话持久化"""
+        sid = db.create_session("t")
+        self._fill(db, sid, 8)
+        pending, last_id = db.get_pending_summary_messages(sid, recent_window=6)
+        db.update_session_summary(sid, "s", until_message_id=last_id)
+
+        # 重新查询，游标仍在 → 无重复待摘要
+        pending_again, _ = db.get_pending_summary_messages(sid, recent_window=6)
+        assert pending_again == []
+        assert db.get_session_summary(sid) == "s"
+
+
