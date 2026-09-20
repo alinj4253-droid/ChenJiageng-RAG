@@ -71,15 +71,10 @@ class RAGGenerator:
         # 组装上下文
         context = self._build_context(chunks)
 
-        # 构建prompt
-        if query_analysis and query_analysis.get('rewritten_query'):
-            effective_query = query_analysis['rewritten_query']
-        else:
-            effective_query = query
-
+        # 生成始终针对用户原始问题；检索侧的 query rewrite 不改变最终提问
         prompt = RAG_USER.format(
             context=context,
-            query=effective_query,
+            query=query,
         )
 
         # 调用LLM
@@ -128,12 +123,8 @@ class RAGGenerator:
             return
 
         context = self._build_context(chunks)
-        if query_analysis and query_analysis.get('rewritten_query'):
-            effective_query = query_analysis['rewritten_query']
-        else:
-            effective_query = query
-
-        prompt = RAG_USER.format(context=context, query=effective_query)
+        # 生成始终针对用户原始问题
+        prompt = RAG_USER.format(context=context, query=query)
 
         # 拼接messages：system + 长期摘要 + 近期对话 + 当前问题
         messages = [{'role': 'system', 'content': RAG_SYSTEM}]

@@ -105,9 +105,9 @@ class RAGPipeline:
         query_analysis = self.query_analyzer.analyze(question)
         latency['query_analysis'] = time.time() - t1
         if verbose:
-            print(f'[查询分析] 改写: {query_analysis.get("rewritten_query")}')
-            print(f'[查询分析] 类型: {query_analysis.get("query_type")}')
-            print(f'[查询分析] 实体: {query_analysis.get("entities")}')
+            print(f'[查询分析] 模式: {query_analysis.get("query_mode")}')
+            print(f'[查询分析] 低层关键词: {query_analysis.get("low_level_keywords")}')
+            print(f'[查询分析] 高层关键词: {query_analysis.get("high_level_keywords")}')
 
         # 2. 混合检索（直接用原问题，查询分析仅做意图识别）
         t2 = time.time()
@@ -181,7 +181,13 @@ class RAGPipeline:
         t1 = time.time()
         # 简单的短问题直接跳过改写，省掉一次LLM调用
         if len(question) < 15:
-            query_analysis = {"rewritten_query": question, "query_mode": "hybrid"}
+            query_analysis = {
+                "original_query": question,
+                "low_level_keywords": [],
+                "high_level_keywords": [],
+                "query_mode": "hybrid",
+                "reason": "短问题跳过LLM分析",
+            }
         else:
             query_analysis = self.query_analyzer.analyze(question)
         latency['query_analysis'] = time.time() - t1

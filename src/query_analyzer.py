@@ -1,9 +1,8 @@
 """
 查询理解模块
-查询改写、实体识别、查询分类、子查询分解
+意图识别 + 低层/高层关键词提取 + 查询模式分类（query_mode）
 """
-import json
-from typing import Dict, List, Optional
+from typing import Dict
 
 from src.llm_client import get_client
 from src.prompts import QUERY_ANALYSIS_SYSTEM, QUERY_ANALYSIS_USER
@@ -48,13 +47,10 @@ class QueryAnalyzer:
             result['high_level_keywords'] = []
         if 'query_mode' not in result:
             result['query_mode'] = 'hybrid'
+        if 'reason' not in result:
+            result['reason'] = ''
 
         return result
-
-    def rewrite(self, query: str) -> str:
-        """仅做查询改写"""
-        result = self.analyze(query)
-        return result.get('rewritten_query', query)
 
 
 if __name__ == '__main__':
@@ -69,8 +65,8 @@ if __name__ == '__main__':
     for q in test_queries:
         result = analyzer.analyze(q)
         print(f'查询: {q}')
-        print(f'  改写: {result.get("rewritten_query")}')
-        print(f'  类型: {result.get("query_type")}')
-        print(f'  实体: {result.get("entities")}')
-        print(f'  子查询: {result.get("sub_queries")}')
+        print(f'  模式: {result.get("query_mode")}')
+        print(f'  低层关键词: {result.get("low_level_keywords")}')
+        print(f'  高层关键词: {result.get("high_level_keywords")}')
+        print(f'  理由: {result.get("reason")}')
         print()
