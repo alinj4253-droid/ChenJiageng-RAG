@@ -46,8 +46,8 @@ def _make_loop_pipeline(max_retry=1, judge_responses=None, rewrite_responses=Non
     else:
         p.query_rewriter.rewrite.return_value = RewrittenQuery(query="改写后的查询")
 
-    # 检索（含融合/精排）整体 mock，返回 (contexts, graph_entities)
-    p._retrieve_fuse_rerank = MagicMock(return_value=([_chunk("c1")], []))
+    # 检索（含融合/精排）整体 mock，返回 (contexts, graph_entities, candidate_count)
+    p._retrieve_fuse_rerank = MagicMock(return_value=([_chunk("c1")], [], 1))
 
     # latency 累加需要的方法在真实实现里，这里整体 mock 掉检索即可
     return p

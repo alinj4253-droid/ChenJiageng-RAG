@@ -22,6 +22,7 @@ from src.rag_generator import RAGGenerator
 from src.retrieval_router import build_plan, RetrievalPlan
 from src.evidence_judge import EvidenceJudge, EvidenceJudgement
 from src.query_rewriter import QueryRewriter, RewrittenQuery
+from src.trace_logger import StructuredTraceLogger
 from src.config import (
     FINAL_TOP_K,
     RERANK_TOP_N,
@@ -86,6 +87,9 @@ class RAGPipeline:
 
         # 简单查询缓存：相同问题直接返回结果
         self.query_cache = {}
+
+        # 结构化执行 trace 日志
+        self.tracer = StructuredTraceLogger()
         print('RAG Pipeline 初始化完成')
 
     # ------------------------------------------------------------------
@@ -195,9 +199,11 @@ class RAGPipeline:
     def _retrieve_fuse_rerank(self, query: str, analysis: Dict,
                               plan: RetrievalPlan,
                               latency: Optional[Dict] = None
-                              ) -> Tuple[List[Dict], List[Dict]]:
+                              ) -> Tuple[List[Dict], List[Dict], int]:
         """对给定 query 执行：按 Plan 检索 → Weighted RRF 融合 → 精排。
-        Retry 时可对改写后的 query 重复调用，耗时在 latency 中累加。"""
+        Retry 时可对改写后的 query 重复调用，耗时在 latency 中累加。
+        返回 (reranked, graph_entities, candidate_count)，candidate_count
+        为融合去重后、精排前的候选文档数（供 trace 记录 retrieved_docs）。"""
         latency = latency if latency is not None else {}
 
         t2 = time.time()
@@ -215,7 +221,7 @@ class RAGPipeline:
         else:
             latency.setdefault('rerank', 0.0)
 
-        return reranked, graph_entities
+        return reranked, graph_entities, len(fused)
 
     def _judge_evidence(self, question: str, contexts: List[Dict],
                         plan: RetrievalPlan) -> Optional[EvidenceJudgement]:
@@ -242,9 +248,10 @@ class RAGPipeline:
         previous_queries = {question.strip()}
         judgement: Optional[EvidenceJudgement] = None
         retry_count = 0
+        candidate_count = 0
 
         yield ("status", "正在检索相关资料...")
-        contexts, graph_entities = self._retrieve_fuse_rerank(
+        contexts, graph_entities, candidate_count = self._retrieve_fuse_rerank(
             current_query, analysis, plan, latency
         )
 
@@ -285,7 +292,7 @@ class RAGPipeline:
             retry_count += 1
 
             yield ("status", "正在用改写后的查询补充检索...")
-            contexts, graph_entities = self._retrieve_fuse_rerank(
+            contexts, graph_entities, candidate_count = self._retrieve_fuse_rerank(
                 current_query, analysis, plan, latency
             )
 
@@ -294,9 +301,10 @@ class RAGPipeline:
             "graph_entities": graph_entities,
             "judgement": judgement,
             "retry_count": retry_count,
+            "candidate_count": candidate_count,
         })
 
-    def _prepare_context(self, question: str) -> Tuple[List[Dict], Dict, RetrievalPlan, List[Dict], Dict, Optional[EvidenceJudgement], int]:
+    def _prepare_context(self, question: str) -> Tuple[List[Dict], Dict, RetrievalPlan, List[Dict], Dict, Optional[EvidenceJudgement], int, int]:
         """查询分析 → 路由 → （检索-裁判-有限重试）循环（非流式路径共用）"""
         latency: Dict[str, float] = {}
 
@@ -311,7 +319,8 @@ class RAGPipeline:
                 outcome = payload
 
         return (outcome["contexts"], analysis, plan, outcome["graph_entities"],
-                latency, outcome["judgement"], outcome["retry_count"])
+                latency, outcome["judgement"], outcome["retry_count"],
+                outcome["candidate_count"])
 
     # ------------------------------------------------------------------
     # 非流式查询
@@ -332,8 +341,8 @@ class RAGPipeline:
             return cached
 
         t0 = time.time()
-        reranked, analysis, plan, graph_entities, latency, judgement, retry_count = \
-            self._prepare_context(question)
+        (reranked, analysis, plan, graph_entities, latency,
+         judgement, retry_count, candidate_count) = self._prepare_context(question)
 
         if verbose:
             print(f'[查询分析] 模式: {analysis.get("query_mode")}')
@@ -368,6 +377,20 @@ class RAGPipeline:
             'references': gen_result['references'],
             'latency': latency,
         }
+
+        # 结构化执行 trace（落盘 JSONL，失败不影响主流程）
+        try:
+            trace = self.tracer.build_trace(
+                question=question, analysis=analysis, plan=plan,
+                contexts=reranked, graph_entities=graph_entities,
+                judgement=judgement, retry_count=retry_count,
+                candidate_count=candidate_count, latency=latency,
+            )
+            self.tracer.log(trace)
+            result['trace'] = trace
+        except Exception as e:
+            print(f'trace 记录失败: {e}')
+
         self.query_cache[cache_key] = result
         return result
 
@@ -396,6 +419,7 @@ class RAGPipeline:
         graph_entities = []
         judgement = None
         retry_count = 0
+        candidate_count = 0
         for kind, payload in self._retrieval_loop(question, analysis, plan, latency):
             if kind == "status":
                 yield {"type": "status", "message": payload}
@@ -404,6 +428,7 @@ class RAGPipeline:
                 judgement = payload["judgement"]
                 retry_count = payload["retry_count"]
                 graph_entities = payload["graph_entities"]
+                candidate_count = payload["candidate_count"]
         if graph_entities:
             yield {"type": "status",
                    "message": f"图谱匹配到 {len(graph_entities)} 个实体"}
@@ -423,6 +448,19 @@ class RAGPipeline:
         latency['generation'] = time.time() - t6
         latency['total'] = time.time() - t0
 
+        # 结构化执行 trace（失败不影响流式主流程）
+        trace = None
+        try:
+            trace = self.tracer.build_trace(
+                question=question, analysis=analysis, plan=plan,
+                contexts=reranked, graph_entities=graph_entities,
+                judgement=judgement, retry_count=retry_count,
+                candidate_count=candidate_count, latency=latency,
+            )
+            self.tracer.log(trace)
+        except Exception as e:
+            print(f'trace 记录失败: {e}')
+
         yield {
             "type": "done",
             "references": references,
@@ -432,6 +470,7 @@ class RAGPipeline:
             "evidence_sufficient": judgement.sufficient if judgement else None,
             "retry_count": retry_count,
             "retrieval_rounds": retry_count + 1,
+            "trace": trace,
         }
 
 

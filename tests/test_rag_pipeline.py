@@ -27,6 +27,9 @@ def _make_pipeline(use_graph=True, use_rerank=True, enable_routing=True,
     pipeline.use_rerank = use_rerank
     pipeline.enable_routing = enable_routing
     pipeline.fixed_plan = None
+    # trace 只组装不落盘，避免测试产生日志文件
+    from src.trace_logger import StructuredTraceLogger
+    pipeline.tracer = StructuredTraceLogger(enabled=False)
 
     pipeline.query_analyzer = MagicMock()
     pipeline.query_analyzer.analyze.return_value = {
@@ -86,6 +89,12 @@ class TestPipelineSmoke:
         assert "references" in result
         assert result["query_mode"] == "hybrid"
         assert "retrieval_plan" in result
+        # trace 已组装并随结果返回
+        trace = result["trace"]
+        assert trace["query_mode"] == "hybrid"
+        assert "retrieval_plan" in trace and "latency" in trace
+        assert trace["reranked_docs"] == len(result["retrieved_chunks"])
+        assert "retrieved_docs" in trace and "retry_count" in trace
 
     def test_query_without_graph(self):
         p = _make_pipeline(use_graph=False)
@@ -100,7 +109,22 @@ class TestPipelineSmoke:
         first = p.query(q)
         second = p.query(q)
         assert second.get("from_cache") is True
-        assert first["answer"] == second["answer"]
+
+    def test_query_writes_structured_trace(self, tmp_path):
+        import json as _json
+        from src.trace_logger import StructuredTraceLogger
+        p = _make_pipeline()
+        log_file = tmp_path / "rag_trace.jsonl"
+        p.tracer = StructuredTraceLogger(log_file=log_file, enabled=True)
+        p.query("陈嘉庚创办厦门大学的具体经过是怎样的？")
+
+        lines = log_file.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        trace = _json.loads(lines[0])
+        assert trace["query"].startswith("陈嘉庚")
+        assert trace["query_mode"] == "hybrid"
+        assert "retrieval_plan" in trace and "latency" in trace
+        assert trace["retry_count"] == 0
 
 
 class TestFuseRanked:

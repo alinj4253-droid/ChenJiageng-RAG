@@ -15,9 +15,10 @@ VECTOR_DIR = DATA_DIR / "vector_store"
 MODELS_DIR = DATA_DIR / "models"
 TEST_DIR = DATA_DIR / "test"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+LOGS_DIR = PROJECT_ROOT / "logs"
 
 # 确保目录存在
-for d in [CHUNKS_DIR, KG_DIR, VECTOR_DIR, MODELS_DIR, TEST_DIR, OUTPUTS_DIR]:
+for d in [CHUNKS_DIR, KG_DIR, VECTOR_DIR, MODELS_DIR, TEST_DIR, OUTPUTS_DIR, LOGS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # ============ API 配置 ============
@@ -114,6 +115,10 @@ ENABLE_EVIDENCE_JUDGE = True      # 是否启用证据充分性判断
 ENABLE_RELATION_RETRIEVAL = True  # 是否启用关系检索（global/hybrid 模式）
 MAX_RETRIEVAL_RETRY = 1           # 证据不足时最多重试检索次数（第一版固定 1 次）
 RECENT_WINDOW = 6                 # 对话短期记忆窗口（消息条数）
+
+# ============ 可观测性：结构化执行 trace ============
+ENABLE_TRACE_LOG = True           # 是否把每次 query 的执行轨迹写入 JSONL
+TRACE_LOG_FILE = LOGS_DIR / "rag_trace.jsonl"
 
 # ============ Neo4j 连接配置（从 .env 读取，不要硬编码） ============
 NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
