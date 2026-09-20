@@ -26,6 +26,7 @@ def _make_pipeline(use_graph=True, use_rerank=True, enable_routing=True,
     pipeline.use_graph = use_graph
     pipeline.use_rerank = use_rerank
     pipeline.enable_routing = enable_routing
+    pipeline.fixed_plan = None
 
     pipeline.query_analyzer = MagicMock()
     pipeline.query_analyzer.analyze.return_value = {

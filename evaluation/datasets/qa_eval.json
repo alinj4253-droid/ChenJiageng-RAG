@@ -1,0 +1,88 @@
+[
+  {
+    "id": 1,
+    "question": "陈嘉庚创办了厦门大学，请问厦门大学是在哪一年正式开学的？",
+    "type": "fact",
+    "answer_keywords": ["1921", "厦门大学"],
+    "category": "事实型"
+  },
+  {
+    "id": 2,
+    "question": "陈嘉庚的家乡在哪里？他的出生地是哪里？",
+    "type": "fact",
+    "answer_keywords": ["福建", "集美"],
+    "category": "事实型"
+  },
+  {
+    "id": 3,
+    "question": "陈嘉庚和李光前之间是什么关系？李光前在陈嘉庚的事业中扮演什么角色？",
+    "type": "relation",
+    "answer_keywords": ["翁婿", "女婿", "橡胶"],
+    "category": "关系型"
+  },
+  {
+    "id": 4,
+    "question": "《南侨回忆录》主要记录了陈嘉庚哪些方面的经历？",
+    "type": "overview",
+    "answer_keywords": ["南洋", "华侨", "抗日", "筹款"],
+    "category": "概述型"
+  },
+  {
+    "id": 5,
+    "question": "陈嘉庚为什么创办集美学校？他的教育救国思想是怎样形成的？",
+    "type": "overview",
+    "answer_keywords": ["教育", "救国", "振兴"],
+    "category": "概述型"
+  },
+  {
+    "id": 6,
+    "question": "南侨总会的全称是什么？它在抗日战争期间发挥了什么作用？",
+    "type": "fact",
+    "answer_keywords": ["南洋华侨", "赈济", "难民", "筹款"],
+    "category": "事实型"
+  },
+  {
+    "id": 7,
+    "question": "陈嘉庚在南洋主要经营什么实业？他是怎么发家的？",
+    "type": "fact",
+    "answer_keywords": ["橡胶", "菠萝", "种植"],
+    "category": "事实型"
+  },
+  {
+    "id": 8,
+    "question": "集美学校最初创办的是什么学校？后来发展成了哪些学校？",
+    "type": "fact",
+    "answer_keywords": ["小学", "师范", "水产", "航海"],
+    "category": "事实型"
+  },
+  {
+    "id": 9,
+    "question": "陈嘉庚在新中国成立后担任过什么职务？",
+    "type": "fact",
+    "answer_keywords": ["全国政协", "人大", "华侨"],
+    "category": "事实型"
+  },
+  {
+    "id": 10,
+    "question": "陈嘉庚晚年回到国内定居，他主要居住在哪个城市？",
+    "type": "fact",
+    "answer_keywords": ["厦门", "集美"],
+    "category": "事实型"
+  },
+  {
+    "id": 11,
+    "question": "陈嘉庚的孙子现在从事什么职业？",
+    "type": "refusal",
+    "answer_keywords": [],
+    "category": "拒答型",
+    "note": "语料中不包含此信息，系统应礼貌拒答"
+  },
+  {
+    "id": 12,
+    "question": "陈嘉庚的第一任妻子叫什么名字？他们是怎么认识的？",
+    "type": "refusal",
+    "answer_keywords": [],
+    "category": "拒答型",
+    "note": "语料中不包含此信息，系统应礼貌拒答"
+  }
+]

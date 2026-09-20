@@ -46,7 +46,8 @@ class RAGPipeline:
     def __init__(self, use_graph: bool = True, use_rerank: bool = True,
                  enable_routing: Optional[bool] = None,
                  enable_judge: Optional[bool] = None,
-                 max_retry: Optional[int] = None):
+                 max_retry: Optional[int] = None,
+                 fixed_plan: Optional[RetrievalPlan] = None):
         print('初始化RAG Pipeline...')
         self.query_analyzer = QueryAnalyzer()
         self.hybrid_retriever = HybridRetriever()
@@ -79,6 +80,9 @@ class RAGPipeline:
             ENABLE_AGENT_ROUTING if enable_routing is None else enable_routing
         )
 
+        # 消融用：强制使用固定检索 Plan（绕过 Router），用于 Dense/+BM25/+KG/+Rerank 组
+        self.fixed_plan = fixed_plan
+
         # 简单查询缓存：相同问题直接返回结果
         self.query_cache = {}
         print('RAG Pipeline 初始化完成')
@@ -99,7 +103,9 @@ class RAGPipeline:
         return self.query_analyzer.analyze(question)
 
     def _resolve_plan(self, analysis: Dict) -> RetrievalPlan:
-        """根据分析结果决定检索计划；关闭路由时统一走全量 hybrid"""
+        """消融固定 Plan 优先；否则按路由开关决定 Router 还是固定 hybrid"""
+        if self.fixed_plan is not None:
+            return self.fixed_plan
         if self.enable_routing:
             return build_plan(analysis)
         return build_plan({'query_mode': 'hybrid'})
@@ -347,6 +353,7 @@ class RAGPipeline:
             'evidence_judgement': judgement.to_dict() if judgement else None,
             'evidence_sufficient': judgement.sufficient if judgement else None,
             'retry_count': retry_count,
+            'retrieval_rounds': retry_count + 1,
             'answer': gen_result['answer'],
             'references': gen_result['references'],
             'latency': latency,
@@ -414,6 +421,7 @@ class RAGPipeline:
             "retrieval_plan": plan.to_dict(),
             "evidence_sufficient": judgement.sufficient if judgement else None,
             "retry_count": retry_count,
+            "retrieval_rounds": retry_count + 1,
         }
 
 
