@@ -1,0 +1,80 @@
+[
+  {
+    "config": "Dense",
+    "key": "dense",
+    "total_questions": 12,
+    "recall@5": 0.742,
+    "recall@10": 0.808,
+    "mrr": 0.812,
+    "answer_accuracy": 0.556,
+    "refusal_success": 1.0,
+    "avg_latency": 3.888,
+    "avg_retrieval_calls": 1.0,
+    "retry_rate": 0.0
+  },
+  {
+    "config": "Dense+BM25",
+    "key": "dense_bm25",
+    "total_questions": 12,
+    "recall@5": 0.708,
+    "recall@10": 0.808,
+    "mrr": 0.746,
+    "answer_accuracy": 0.472,
+    "refusal_success": 1.0,
+    "avg_latency": 3.468,
+    "avg_retrieval_calls": 1.0,
+    "retry_rate": 0.0
+  },
+  {
+    "config": "+KG",
+    "key": "plus_kg",
+    "total_questions": 12,
+    "recall@5": 0.683,
+    "recall@10": 0.808,
+    "mrr": 0.743,
+    "answer_accuracy": 0.333,
+    "refusal_success": 1.0,
+    "avg_latency": 3.676,
+    "avg_retrieval_calls": 1.0,
+    "retry_rate": 0.0
+  },
+  {
+    "config": "+Rerank",
+    "key": "plus_rerank",
+    "total_questions": 12,
+    "recall@5": 0.658,
+    "recall@10": 0.808,
+    "mrr": 0.81,
+    "answer_accuracy": 0.514,
+    "refusal_success": 1.0,
+    "avg_latency": 6.827,
+    "avg_retrieval_calls": 1.0,
+    "retry_rate": 0.0
+  },
+  {
+    "config": "Agent Router",
+    "key": "agent_router",
+    "total_questions": 12,
+    "recall@5": 0.717,
+    "recall@10": 0.808,
+    "mrr": 0.76,
+    "answer_accuracy": 0.451,
+    "refusal_success": 1.0,
+    "avg_latency": 6.318,
+    "avg_retrieval_calls": 1.0,
+    "retry_rate": 0.0
+  },
+  {
+    "config": "Agent Router + Retry",
+    "key": "agent_retry",
+    "total_questions": 12,
+    "recall@5": 0.7,
+    "recall@10": 0.792,
+    "mrr": 0.863,
+    "answer_accuracy": 0.514,
+    "refusal_success": 1.0,
+    "avg_latency": 11.565,
+    "avg_retrieval_calls": 1.583,
+    "retry_rate": 0.583
+  }
+]

@@ -32,6 +32,11 @@
    中以 `ground_truth: "keyword_proxy"` 标明。后续若补齐 `relevant_chunks` 字段，
    评估代码会自动切换到标准口径，无需改动。
 
+   检索指标作用于 pipeline 返回的 `retrieval_candidates`（Weighted RRF 融合后、
+   Cross-Encoder 精排前的 10 个候选），衡量“检索 + 融合”阶段；最终送入 LLM 的是
+   精排后 Top-5（`retrieved_chunks`）。精排不增加召回、只调整顺序，其价值由
+   Answer Accuracy 体现。
+
 拒答题（`type=refusal`）不计入检索 Recall/MRR，单独统计拒答成功率
 （答案是否包含“未找到 / 无法确定 / 语料中没有”等拒答信号）。
 
