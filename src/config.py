@@ -106,6 +106,13 @@ KG_MAX_RELATIONS_PER_CHUNK = 15
 GRAPH_TOP_K = 10              # 图谱检索返回chunk数
 GRAPH_EXPAND_DEPTH = 2        # 子图扩展深度
 
+# ============ Agentic RAG 配置 ============
+ENABLE_AGENT_ROUTING = True       # 是否启用查询模式路由（关闭则所有查询走全量检索）
+ENABLE_EVIDENCE_JUDGE = True      # 是否启用证据充分性判断
+ENABLE_RELATION_RETRIEVAL = True  # 是否启用关系检索（global/hybrid 模式）
+MAX_RETRIEVAL_RETRY = 1           # 证据不足时最多重试检索次数（第一版固定 1 次）
+RECENT_WINDOW = 6                 # 对话短期记忆窗口（消息条数）
+
 # ============ Neo4j 连接配置（从 .env 读取，不要硬编码） ============
 NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")

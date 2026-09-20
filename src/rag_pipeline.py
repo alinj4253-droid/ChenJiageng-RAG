@@ -1,96 +1,200 @@
 """
 RAG主Pipeline
-查询理解 -> 混合检索 + 图谱检索 -> 结果融合 -> Rerank -> 生成答案
+
+查询理解(QueryAnalyzer)
+  → 检索路由(RetrievalRouter, query_mode → RetrievalPlan)
+  → 按 Plan 执行 Dense / BM25 / Graph 多路检索
+  → Weighted RRF 融合
+  → Cross-Encoder Rerank（按 Plan）
+  → 生成答案
+
+Agentic 决策只出现在 query_mode（LLM 判断）这一处，
+检索路径本身是确定性规则映射，保证可控、可测、便于消融。
 """
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from src.query_analyzer import QueryAnalyzer
 from src.hybrid_retriever import HybridRetriever
 from src.graph_retriever import GraphRetriever
 from src.reranker import Reranker
 from src.rag_generator import RAGGenerator
-from src.config import FINAL_TOP_K, KG_WEIGHT
+from src.retrieval_router import build_plan, RetrievalPlan
+from src.config import (
+    FINAL_TOP_K,
+    RERANK_TOP_N,
+    RRF_K,
+    VECTOR_TOP_K,
+    BM25_TOP_K,
+    VECTOR_WEIGHT,
+    BM25_WEIGHT,
+    KG_WEIGHT,
+    ENABLE_AGENT_ROUTING,
+)
+
+# 融合候选数：送入 rerank 前保留的候选规模
+FUSION_CANDIDATES = RERANK_TOP_N
 
 
 class RAGPipeline:
     """完整的RAG问答流水线"""
 
-    def __init__(self, use_graph: bool = True, use_rerank: bool = True):
+    def __init__(self, use_graph: bool = True, use_rerank: bool = True,
+                 enable_routing: Optional[bool] = None):
         print('初始化RAG Pipeline...')
         self.query_analyzer = QueryAnalyzer()
         self.hybrid_retriever = HybridRetriever()
+        # 复用 hybrid 内部的基础检索器，使 Router 能按 Plan 单独调用 dense / bm25
+        self.vector_retriever = self.hybrid_retriever.vector_retriever
+        self.bm25_retriever = self.hybrid_retriever.bm25_retriever
+
         self.use_graph = use_graph
         if use_graph:
             self.graph_retriever = GraphRetriever()
+
         self.use_rerank = use_rerank
         if use_rerank:
             self.reranker = Reranker()
+
         self.generator = RAGGenerator()
+
+        # Agent 路由开关：显式参数优先，否则读全局配置（便于消融 Agent On/Off）
+        self.enable_routing = (
+            ENABLE_AGENT_ROUTING if enable_routing is None else enable_routing
+        )
+
         # 简单查询缓存：相同问题直接返回结果
         self.query_cache = {}
         print('RAG Pipeline 初始化完成')
 
-    def _fuse_results(self, hybrid_results: List[Dict], graph_results: List[Dict]) -> List[Dict]:
+    # ------------------------------------------------------------------
+    # 查询分析
+    # ------------------------------------------------------------------
+    def _analyze(self, question: str) -> Dict:
+        """查询分析；很短的事实问题跳过 LLM，直接判为 naive 以降低延迟"""
+        if len(question) < 15:
+            return {
+                'original_query': question,
+                'low_level_keywords': [],
+                'high_level_keywords': [],
+                'query_mode': 'naive',
+                'reason': '短问题跳过LLM分析，按简单事实查询处理',
+            }
+        return self.query_analyzer.analyze(question)
+
+    def _resolve_plan(self, analysis: Dict) -> RetrievalPlan:
+        """根据分析结果决定检索计划；关闭路由时统一走全量 hybrid"""
+        if self.enable_routing:
+            return build_plan(analysis)
+        return build_plan({'query_mode': 'hybrid'})
+
+    # ------------------------------------------------------------------
+    # 按 Plan 检索 + 融合
+    # ------------------------------------------------------------------
+    def _retrieve_by_plan(
+        self, query: str, analysis: Dict, plan: RetrievalPlan
+    ) -> Tuple[List[Tuple[List[Dict], float, str]], List[Dict]]:
         """
-        融合混合检索和图谱检索结果。
-        使用加权RRF融合。
+        按 RetrievalPlan 执行多路检索。
+
+        Returns:
+            ranked_lists: [(results, weight, name), ...] 供 Weighted RRF 融合
+            graph_entities: 图谱命中的实体（用于状态展示/可观测）
         """
-        if not graph_results:
-            return hybrid_results
+        ranked_lists: List[Tuple[List[Dict], float, str]] = []
+        graph_entities: List[Dict] = []
 
-        # 图谱结果权重更高（因为是实体关联的）
-        rrf_scores = {}  # chunk_id -> [score, result]
+        if plan.use_dense:
+            dense = self.vector_retriever.search(query, top_k=VECTOR_TOP_K)
+            ranked_lists.append((dense, VECTOR_WEIGHT, 'dense'))
 
-        # 混合检索结果
-        for rank, r in enumerate(hybrid_results):
-            chunk_id = r['chunk_id']
-            score = 1.0 / (60 + rank + 1)  # RRF，k=60
-            if chunk_id in rrf_scores:
-                rrf_scores[chunk_id][0] += score
-                rrf_scores[chunk_id][1]['hybrid_score'] = r.get('rrf_score', r.get('score', 0))
-            else:
-                r['hybrid_score'] = r.get('rrf_score', r.get('score', 0))
-                rrf_scores[chunk_id] = [score, r]
+        if plan.use_bm25:
+            bm25 = self.bm25_retriever.search(query, top_k=BM25_TOP_K)
+            ranked_lists.append((bm25, BM25_WEIGHT, 'bm25'))
 
-        # 图谱检索结果（乘上 KG_WEIGHT，权重可配）
-        for rank, r in enumerate(graph_results):
-            chunk_id = r['chunk_id']
-            score = KG_WEIGHT / (60 + rank + 1)
-            if chunk_id in rrf_scores:
-                rrf_scores[chunk_id][0] += score
-                rrf_scores[chunk_id][1]['graph_score'] = r.get('score', 0)
-            else:
-                r['graph_score'] = r.get('score', 0)
-                rrf_scores[chunk_id] = [score, r]
+        if plan.use_graph and self.use_graph:
+            # 实体图谱检索；关系级检索（use_relation）在 Phase 6 接入，
+            # 当前图谱子图扩展本身已沿关系边遍历，可覆盖部分关系需求。
+            graph_result = self.graph_retriever.search(query)
+            graph_chunks = graph_result.get('chunks', [])
+            graph_entities = graph_result.get('entities', [])
+            ranked_lists.append((graph_chunks, KG_WEIGHT, 'graph'))
 
-        # 排序
-        merged = sorted(rrf_scores.values(), key=lambda x: x[0], reverse=True)
-        results = []
-        for score, r in merged:
+        return ranked_lists, graph_entities
+
+    @staticmethod
+    def _fuse_ranked(
+        ranked_lists: List[Tuple[List[Dict], float, str]],
+        top_k: int = FUSION_CANDIDATES,
+    ) -> List[Dict]:
+        """
+        Weighted RRF 融合任意多路检索结果。
+        每路贡献 weight / (RRF_K + rank + 1)，相同 chunk_id 累加并去重。
+        """
+        rrf_scores: Dict[str, list] = {}
+
+        for results, weight, name in ranked_lists:
+            for rank, r in enumerate(results):
+                chunk_id = r['chunk_id']
+                score = weight / (RRF_K + rank + 1)
+                if chunk_id in rrf_scores:
+                    rrf_scores[chunk_id][0] += score
+                    rrf_scores[chunk_id][1].setdefault('sources', []).append(name)
+                else:
+                    merged = dict(r)
+                    merged['sources'] = [name]
+                    merged[f'{name}_score'] = r.get('score', 0)
+                    rrf_scores[chunk_id] = [score, merged]
+
+        ordered = sorted(rrf_scores.values(), key=lambda x: x[0], reverse=True)
+        fused = []
+        for score, r in ordered[:top_k]:
             r['fused_score'] = score
-            results.append(r)
+            fused.append(r)
+        return fused
 
-        return results
+    def _rerank_by_plan(self, question: str, fused: List[Dict],
+                        plan: RetrievalPlan) -> Tuple[List[Dict], bool]:
+        """按 Plan 决定是否精排，返回 (chunks, rerank_applied)"""
+        if plan.use_rerank and self.use_rerank and self.reranker.model is not None:
+            return self.reranker.rerank(question, fused, top_k=FINAL_TOP_K), True
+        return fused[:FINAL_TOP_K], False
 
+    def _prepare_context(self, question: str) -> Tuple[List[Dict], Dict, RetrievalPlan, List[Dict], Dict]:
+        """查询分析 → 路由 → 检索 → 融合 → 精排（非流式路径共用）"""
+        latency: Dict[str, float] = {}
+
+        t1 = time.time()
+        analysis = self._analyze(question)
+        plan = self._resolve_plan(analysis)
+        latency['query_analysis'] = time.time() - t1
+
+        t2 = time.time()
+        ranked_lists, graph_entities = self._retrieve_by_plan(question, analysis, plan)
+        latency['retrieval'] = time.time() - t2
+
+        t3 = time.time()
+        fused = self._fuse_ranked(ranked_lists, FUSION_CANDIDATES)
+        latency['fusion'] = time.time() - t3
+
+        t4 = time.time()
+        reranked, rerank_applied = self._rerank_by_plan(question, fused, plan)
+        latency['rerank'] = time.time() - t4 if rerank_applied else 0.0
+
+        return reranked, analysis, plan, graph_entities, latency
+
+    # ------------------------------------------------------------------
+    # 非流式查询
+    # ------------------------------------------------------------------
     def query(self, question: str, verbose: bool = False) -> Dict:
         """
         执行完整的RAG问答。
 
-        Args:
-            question: 用户问题
-            verbose: 是否打印中间过程
-
         返回: {
-            "question": 原始问题,
-            "query_analysis": 查询分析结果,
-            "retrieved_chunks": 检索到的chunk,
-            "answer": 生成的答案,
-            "references": 引用列表,
-            "latency": 各阶段耗时,
+            "question", "query_analysis", "query_mode", "retrieval_plan",
+            "retrieved_chunks", "answer", "references", "latency"
         }
         """
-        # 查询缓存：相同问题直接返回
         cache_key = question.strip()
         if cache_key in self.query_cache:
             cached = self.query_cache[cache_key].copy()
@@ -98,134 +202,83 @@ class RAGPipeline:
             return cached
 
         t0 = time.time()
-        latency = {}
+        reranked, analysis, plan, graph_entities, latency = self._prepare_context(question)
 
-        # 1. 查询理解
-        t1 = time.time()
-        query_analysis = self.query_analyzer.analyze(question)
-        latency['query_analysis'] = time.time() - t1
         if verbose:
-            print(f'[查询分析] 模式: {query_analysis.get("query_mode")}')
-            print(f'[查询分析] 低层关键词: {query_analysis.get("low_level_keywords")}')
-            print(f'[查询分析] 高层关键词: {query_analysis.get("high_level_keywords")}')
+            print(f'[查询分析] 模式: {analysis.get("query_mode")}')
+            print(f'[路由] 启用检索器: {plan.enabled_retrievers()} | 精排: {plan.use_rerank}')
+            print(f'[图谱检索] 匹配实体: {[e["name"] for e in graph_entities]}')
+            print(f'[融合+精排] 最终上下文 {len(reranked)} 个chunk')
 
-        # 2. 混合检索（直接用原问题，查询分析仅做意图识别）
-        t2 = time.time()
-        effective_query = question
-        hybrid_results = self.hybrid_retriever.search(effective_query, top_k=FINAL_TOP_K * 2)
-        latency['hybrid_retrieval'] = time.time() - t2
-        if verbose:
-            print(f'[混合检索] 召回 {len(hybrid_results)} 个chunk')
-
-        # 3. 图谱检索
-        graph_results = []
-        if self.use_graph:
-            t3 = time.time()
-            graph_result = self.graph_retriever.search(effective_query)
-            graph_results = graph_result.get('chunks', [])
-            latency['graph_retrieval'] = time.time() - t3
-            if verbose:
-                print(f'[图谱检索] 匹配实体: {[e["name"] for e in graph_result.get("entities", [])]}')
-                print(f'[图谱检索] 召回 {len(graph_results)} 个chunk')
-
-        # 4. 结果融合
-        t4 = time.time()
-        fused = self._fuse_results(hybrid_results, graph_results)
-        latency['fusion'] = time.time() - t4
-        if verbose:
-            print(f'[结果融合] 共 {len(fused)} 个chunk')
-
-        # 5. Rerank
-        if self.use_rerank and self.reranker.model is not None:
-            t5 = time.time()
-            reranked = self.reranker.rerank(effective_query, fused, top_k=FINAL_TOP_K)
-            latency['rerank'] = time.time() - t5
-            if verbose:
-                print(f'[Rerank] 保留前 {len(reranked)} 个')
-        else:
-            reranked = fused[:FINAL_TOP_K]
-            latency['rerank'] = 0
-
-        # 6. 生成答案
         t6 = time.time()
-        gen_result = self.generator.generate(question, reranked, query_analysis)
+        gen_result = self.generator.generate(question, reranked, analysis)
         latency['generation'] = time.time() - t6
-
         latency['total'] = time.time() - t0
 
         result = {
             'question': question,
-            'query_analysis': query_analysis,
+            'query_analysis': analysis,
+            'query_mode': analysis.get('query_mode'),
+            'retrieval_plan': plan.to_dict(),
             'retrieved_chunks': reranked,
             'answer': gen_result['answer'],
             'references': gen_result['references'],
             'latency': latency,
         }
-        # 存入查询缓存
         self.query_cache[cache_key] = result
         return result
 
+    # ------------------------------------------------------------------
+    # 流式查询
+    # ------------------------------------------------------------------
     def query_stream(self, question: str, history: list = None):
         """
         流式查询，yield事件字典：
         - {"type": "status", "message": "..."}  思考过程状态
         - {"type": "token", "content": "..."}    生成的token
-        - {"type": "done", "references": [...], "latency": {...}}  完成
-        history: 历史对话messages列表，[{"role":"user","content":"..."}, {"role":"assistant","content":"..."}]
+        - {"type": "done", "references": [...], "latency": {...}, ...}
         """
         t0 = time.time()
-        latency = {}
+        latency: Dict[str, float] = {}
 
-        # 1. 查询理解（简单问题跳过LLM改写，直接用原问题，提速）
-        yield {"type": "status", "message": "正在检索相关资料..."}
+        # 1. 查询分析 + 路由
+        yield {"type": "status", "message": "正在理解问题..."}
         t1 = time.time()
-        # 简单的短问题直接跳过改写，省掉一次LLM调用
-        if len(question) < 15:
-            query_analysis = {
-                "original_query": question,
-                "low_level_keywords": [],
-                "high_level_keywords": [],
-                "query_mode": "hybrid",
-                "reason": "短问题跳过LLM分析",
-            }
-        else:
-            query_analysis = self.query_analyzer.analyze(question)
+        analysis = self._analyze(question)
+        plan = self._resolve_plan(analysis)
         latency['query_analysis'] = time.time() - t1
 
-        # 2. 混合检索（直接用原问题）
+        # 2. 按 Plan 多路检索
         yield {"type": "status", "message": "正在检索相关资料..."}
         t2 = time.time()
-        effective_query = question
-        hybrid_results = self.hybrid_retriever.search(effective_query, top_k=FINAL_TOP_K * 2)
-        latency['hybrid_retrieval'] = time.time() - t2
+        ranked_lists, graph_entities = self._retrieve_by_plan(question, analysis, plan)
+        latency['retrieval'] = time.time() - t2
+        if graph_entities:
+            yield {"type": "status",
+                   "message": f"图谱匹配到 {len(graph_entities)} 个实体"}
 
-        # 3. 图谱检索
-        graph_results = []
-        if self.use_graph:
-            t3 = time.time()
-            graph_result = self.graph_retriever.search(effective_query)
-            graph_results = graph_result.get('chunks', [])
-            latency['graph_retrieval'] = time.time() - t3
-            yield {"type": "status", "message": f"图谱匹配到 {len(graph_result.get('entities', []))} 个实体"}
+        # 3. 融合
+        t3 = time.time()
+        fused = self._fuse_ranked(ranked_lists, FUSION_CANDIDATES)
+        latency['fusion'] = time.time() - t3
 
-        # 4. 结果融合
-        fused = self._fuse_results(hybrid_results, graph_results)
-
-        # 5. Rerank
-        if self.use_rerank and self.reranker.model is not None:
+        # 4. 精排（按 Plan）
+        if plan.use_rerank and self.use_rerank and self.reranker.model is not None:
             yield {"type": "status", "message": "正在精排结果..."}
-            t5 = time.time()
-            reranked = self.reranker.rerank(effective_query, fused, top_k=FINAL_TOP_K)
-            latency['rerank'] = time.time() - t5
+            t4 = time.time()
+            reranked = self.reranker.rerank(question, fused, top_k=FINAL_TOP_K)
+            latency['rerank'] = time.time() - t4
         else:
             reranked = fused[:FINAL_TOP_K]
-            latency['rerank'] = 0
+            latency['rerank'] = 0.0
 
-        # 6. 流式生成
+        # 5. 流式生成
         yield {"type": "status", "message": "正在生成答案..."}
         t6 = time.time()
         references = []
-        for delta, refs in self.generator.generate_stream(question, reranked, query_analysis, history=history):
+        for delta, refs in self.generator.generate_stream(
+            question, reranked, analysis, history=history
+        ):
             if refs is not None:
                 references = refs
             else:
@@ -233,11 +286,16 @@ class RAGPipeline:
         latency['generation'] = time.time() - t6
         latency['total'] = time.time() - t0
 
-        yield {"type": "done", "references": references, "latency": latency}
+        yield {
+            "type": "done",
+            "references": references,
+            "latency": latency,
+            "query_mode": analysis.get("query_mode"),
+            "retrieval_plan": plan.to_dict(),
+        }
 
 
 if __name__ == '__main__':
-    # 测试
     pipeline = RAGPipeline()
     result = pipeline.query('陈嘉庚创办了哪些学校？', verbose=True)
     print(f'\n答案: {result["answer"]}')
