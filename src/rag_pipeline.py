@@ -120,10 +120,17 @@ class RAGPipeline:
     # 按 Plan 检索 + 融合
     # ------------------------------------------------------------------
     def _retrieve_by_plan(
-        self, query: str, analysis: Dict, plan: RetrievalPlan
+        self, query: str, analysis: Dict, plan: RetrievalPlan,
+        counters: Optional[Dict[str, int]] = None,
     ) -> Tuple[List[Tuple[List[Dict], float, str]], List[Dict]]:
         """
         按 RetrievalPlan 执行多路检索。
+
+        Args:
+            counters: 可选的可变计数器字典；每真正调用一次 Retriever，对应
+                      key（dense/bm25/entity_graph/relation_graph）+1。用于
+                      区分 retrieval_rounds（检索轮次）与 retrieval_calls
+                      （实际 Retriever 调用次数）——一轮可能调用多个 Retriever。
 
         Returns:
             ranked_lists: [(results, weight, name), ...] 供 Weighted RRF 融合
@@ -131,17 +138,22 @@ class RAGPipeline:
         """
         ranked_lists: List[Tuple[List[Dict], float, str]] = []
         graph_entities: List[Dict] = []
+        if counters is None:
+            counters = {}
 
         if plan.use_dense:
+            counters["dense"] = counters.get("dense", 0) + 1
             dense = self.vector_retriever.search(query, top_k=VECTOR_TOP_K)
             ranked_lists.append((dense, VECTOR_WEIGHT, 'dense'))
 
         if plan.use_bm25:
+            counters["bm25"] = counters.get("bm25", 0) + 1
             bm25 = self.bm25_retriever.search(query, top_k=BM25_TOP_K)
             ranked_lists.append((bm25, BM25_WEIGHT, 'bm25'))
 
         if plan.use_graph and self.use_graph:
             # 实体图谱检索：实体匹配 + 双向子图扩展 + 关联 chunk 召回
+            counters["entity_graph"] = counters.get("entity_graph", 0) + 1
             graph_result = self.graph_retriever.search(query)
             graph_chunks = graph_result.get('chunks', [])
             graph_entities = graph_result.get('entities', [])
@@ -149,11 +161,13 @@ class RAGPipeline:
 
         if plan.use_relation and self.use_graph:
             # 关系检索：high-level 抽象关键词走关系向量索引；
-            # 无 high-level 关键词时回退用原始 query
+            # 无 high-level 关键词时回退用原始 query。
+            # 无论是否召回结果，relation_chunks 都被真正调用一次，计入 calls。
             rel_query = " ".join(analysis.get('high_level_keywords', [])) or query
             rel_chunks = self.graph_retriever.relation_chunks(
                 rel_query, top_k=GRAPH_TOP_K
             )
+            counters["relation_graph"] = counters.get("relation_graph", 0) + 1
             if rel_chunks:
                 ranked_lists.append((rel_chunks, KG_WEIGHT, 'graph_relation'))
 
@@ -199,10 +213,12 @@ class RAGPipeline:
 
     def _retrieve_fuse_rerank(self, query: str, analysis: Dict,
                               plan: RetrievalPlan,
-                              latency: Optional[Dict] = None
+                              latency: Optional[Dict] = None,
+                              counters: Optional[Dict[str, int]] = None
                               ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         """对给定 query 执行：按 Plan 检索 → Weighted RRF 融合 → 精排。
-        Retry 时可对改写后的 query 重复调用，耗时在 latency 中累加。
+        Retry 时可对改写后的 query 重复调用，耗时在 latency 中累加，
+        Retriever 调用次数在 counters 中累加（跨轮次）。
         返回 (reranked, graph_entities, fused)：
           - reranked：精排后最终上下文（FINAL_TOP_K）
           - fused：精排前融合候选（FUSION_CANDIDATES），供检索 Recall@K 评估
@@ -210,7 +226,9 @@ class RAGPipeline:
         latency = latency if latency is not None else {}
 
         t2 = time.time()
-        ranked_lists, graph_entities = self._retrieve_by_plan(query, analysis, plan)
+        ranked_lists, graph_entities = self._retrieve_by_plan(
+            query, analysis, plan, counters=counters
+        )
         latency['retrieval'] = latency.get('retrieval', 0.0) + (time.time() - t2)
 
         t3 = time.time()
@@ -253,9 +271,14 @@ class RAGPipeline:
         retry_count = 0
         candidates: List[Dict] = []
 
+        # 跨轮次累加真实 Retriever 调用次数（区别于检索轮次 rounds）
+        retrieval_counters: Dict[str, int] = {
+            "dense": 0, "bm25": 0, "entity_graph": 0, "relation_graph": 0,
+        }
+
         yield ("status", "正在检索相关资料...")
         contexts, graph_entities, candidates = self._retrieve_fuse_rerank(
-            current_query, analysis, plan, latency
+            current_query, analysis, plan, latency, counters=retrieval_counters
         )
 
         while self.evidence_judge is not None and plan.use_evidence_judge:
@@ -296,7 +319,7 @@ class RAGPipeline:
 
             yield ("status", "正在用改写后的查询补充检索...")
             contexts, graph_entities, candidates = self._retrieve_fuse_rerank(
-                current_query, analysis, plan, latency
+                current_query, analysis, plan, latency, counters=retrieval_counters
             )
 
         yield ("result", {
@@ -306,6 +329,8 @@ class RAGPipeline:
             "retry_count": retry_count,
             "candidates": candidates,
             "candidate_count": len(candidates),
+            "retrieval_calls": sum(retrieval_counters.values()),
+            "retrieval_call_detail": dict(retrieval_counters),
         })
 
     def _prepare_context(self, question: str) -> Tuple[List[Dict], Dict, RetrievalPlan, List[Dict], Dict, Optional[EvidenceJudgement], int, List[Dict]]:
@@ -324,7 +349,8 @@ class RAGPipeline:
 
         return (outcome["contexts"], analysis, plan, outcome["graph_entities"],
                 latency, outcome["judgement"], outcome["retry_count"],
-                outcome["candidates"])
+                outcome["candidates"],
+                outcome["retrieval_calls"], outcome["retrieval_call_detail"])
 
     # ------------------------------------------------------------------
     # 非流式查询
@@ -346,7 +372,8 @@ class RAGPipeline:
 
         t0 = time.time()
         (reranked, analysis, plan, graph_entities, latency,
-         judgement, retry_count, candidates) = self._prepare_context(question)
+         judgement, retry_count, candidates,
+         retrieval_calls, retrieval_call_detail) = self._prepare_context(question)
 
         if verbose:
             print(f'[查询分析] 模式: {analysis.get("query_mode")}')
@@ -378,6 +405,8 @@ class RAGPipeline:
             'evidence_sufficient': judgement.sufficient if judgement else None,
             'retry_count': retry_count,
             'retrieval_rounds': retry_count + 1,
+            'retrieval_calls': retrieval_calls,
+            'retrieval_call_detail': retrieval_call_detail,
             'answer': gen_result['answer'],
             'references': gen_result['references'],
             'latency': latency,
@@ -390,6 +419,8 @@ class RAGPipeline:
                 contexts=reranked, graph_entities=graph_entities,
                 judgement=judgement, retry_count=retry_count,
                 candidate_count=len(candidates), latency=latency,
+                retrieval_calls=retrieval_calls,
+                retrieval_call_detail=retrieval_call_detail,
             )
             self.tracer.log(trace)
             result['trace'] = trace
@@ -425,6 +456,8 @@ class RAGPipeline:
         graph_entities = []
         judgement = None
         retry_count = 0
+        retrieval_calls = 0
+        retrieval_call_detail: Dict[str, int] = {}
         for kind, payload in self._retrieval_loop(question, analysis, plan, latency):
             if kind == "status":
                 yield {"type": "status", "message": payload}
@@ -434,6 +467,8 @@ class RAGPipeline:
                 retry_count = payload["retry_count"]
                 graph_entities = payload["graph_entities"]
                 candidates = payload["candidates"]
+                retrieval_calls = payload["retrieval_calls"]
+                retrieval_call_detail = payload["retrieval_call_detail"]
         if graph_entities:
             yield {"type": "status",
                    "message": f"图谱匹配到 {len(graph_entities)} 个实体"}
@@ -461,6 +496,8 @@ class RAGPipeline:
                 contexts=reranked, graph_entities=graph_entities,
                 judgement=judgement, retry_count=retry_count,
                 candidate_count=len(candidates), latency=latency,
+                retrieval_calls=retrieval_calls,
+                retrieval_call_detail=retrieval_call_detail,
             )
             self.tracer.log(trace)
         except Exception as e:
@@ -475,6 +512,8 @@ class RAGPipeline:
             "evidence_sufficient": judgement.sufficient if judgement else None,
             "retry_count": retry_count,
             "retrieval_rounds": retry_count + 1,
+            "retrieval_calls": retrieval_calls,
+            "retrieval_call_detail": retrieval_call_detail,
             "trace": trace,
         }
 

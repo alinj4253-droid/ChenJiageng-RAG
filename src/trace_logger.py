@@ -27,7 +27,9 @@ class StructuredTraceLogger:
     def build_trace(self, *, question: str, analysis: Dict, plan,
                     contexts, graph_entities, judgement,
                     retry_count: int, candidate_count: int,
-                    latency: Dict) -> Dict:
+                    latency: Dict,
+                    retrieval_calls: int = 0,
+                    retrieval_call_detail: Optional[Dict[str, int]] = None) -> Dict:
         """组装一条结构化 trace（与是否落盘解耦，便于单测断言字段）"""
         plan_dict = plan.to_dict() if hasattr(plan, "to_dict") else dict(plan)
         return {
@@ -42,6 +44,11 @@ class StructuredTraceLogger:
                 judgement.sufficient if judgement is not None else None
             ),
             "retry_count": retry_count,
+            # retrieval_rounds = 检索轮次（每轮可能调用多个 Retriever）；
+            # retrieval_calls = 实际 Retriever 调用总次数，按来源细分
+            "retrieval_rounds": retry_count + 1,
+            "retrieval_calls": retrieval_calls,
+            "retrieval_call_detail": retrieval_call_detail or {},
             "latency": {k: round(float(v), 4) for k, v in latency.items()},
         }
 

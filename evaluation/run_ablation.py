@@ -80,6 +80,8 @@ def run_profile(profile: Dict, questions: List[Dict]) -> Dict:
             "query_mode": result.get("query_mode"),
             "retry_count": result.get("retry_count", 0),
             "retrieval_rounds": result.get("retrieval_rounds", 1),
+            "retrieval_calls": result.get("retrieval_calls", 0),
+            "retrieval_call_detail": result.get("retrieval_call_detail", {}),
             "evidence_sufficient": result.get("evidence_sufficient"),
             "answer": (result.get("answer") or "")[:300],
             "latency_total": round(latency.get("total", wall), 3),
@@ -112,8 +114,11 @@ def run_profile(profile: Dict, questions: List[Dict]) -> Dict:
             for r in details
         ]), 3),
         "avg_latency": round(_mean([r["latency_total"] for r in details]), 3),
-        "avg_retrieval_calls": round(
+        "avg_retrieval_rounds": round(
             _mean([r["retrieval_rounds"] for r in details]), 3
+        ),
+        "avg_retrieval_calls": round(
+            _mean([r["retrieval_calls"] for r in details]), 3
         ),
         "retry_rate": round(
             sum(1 for r in details if r["retry_count"] > 0) / max(len(details), 1), 3
@@ -123,15 +128,16 @@ def run_profile(profile: Dict, questions: List[Dict]) -> Dict:
 
 
 def _print_table(summaries: List[Dict]):
-    header = (f"{'Method':<22}{'Recall@5':>10}{'Recall@10':>10}{'MRR':>8}"
-              f"{'Accuracy':>10}{'Latency':>10}{'Calls':>8}{'Retry%':>8}")
+    header = (f"{'Method':<24}{'Recall@5':>10}{'Recall@10':>10}{'MRR':>8}"
+              f"{'Acc':>7}{'Latency':>9}{'Rounds':>8}{'Calls':>7}{'Retry%':>8}")
     print('\n' + '=' * len(header))
     print(header)
     print('-' * len(header))
     for s in summaries:
-        print(f"{s['config']:<22}{s['recall@5']:>10.3f}{s['recall@10']:>10.3f}"
-              f"{s['mrr']:>8.3f}{s['answer_accuracy']:>10.3f}"
-              f"{s['avg_latency']:>9.2f}s{s['avg_retrieval_calls']:>8.2f}"
+        print(f"{s['config']:<24}{s['recall@5']:>10.3f}{s['recall@10']:>10.3f}"
+              f"{s['mrr']:>8.3f}{s['answer_accuracy']:>7.3f}"
+              f"{s['avg_latency']:>8.2f}s{s['avg_retrieval_rounds']:>8.2f}"
+              f"{s['avg_retrieval_calls']:>7.2f}"
               f"{s['retry_rate']:>8.1%}")
     print('=' * len(header))
 

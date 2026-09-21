@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 from src.rag_pipeline import RAGPipeline
 from src.retrieval_router import build_plan
 from src.evidence_judge import EvidenceJudgement
+from src.query_rewriter import RewrittenQuery
 
 
 def _chunk(cid, text=None):
@@ -310,3 +311,76 @@ class TestEvidenceJudgeIntegration:
         result = p.query("陈嘉庚创办厦门大学的具体经过和历史背景是什么？")
         assert result["evidence_sufficient"] is False
         assert "缺少创办经费来源" in result["evidence_judgement"]["missing"]
+
+
+class TestRetrievalCallCounting:
+    """Task3：区分 retrieval_rounds（轮次）与 retrieval_calls（真实 Retriever 调用）"""
+
+    def _counters(self):
+        return {"dense": 0, "bm25": 0, "entity_graph": 0, "relation_graph": 0}
+
+    def test_naive_plan_calls_two_retrievers(self):
+        """Case1：naive = dense + bm25 → 1 轮 / 2 次调用"""
+        p = _make_pipeline()
+        counters = self._counters()
+        plan = build_plan({"query_mode": "naive"})
+        p._retrieve_by_plan("q", {"high_level_keywords": []}, plan, counters)
+        assert counters == {"dense": 1, "bm25": 1, "entity_graph": 0,
+                            "relation_graph": 0}
+
+    def test_hybrid_plan_calls_four_retrievers(self):
+        """Case2：hybrid = dense+bm25+entity_graph+relation → 1 轮 / 4 次调用"""
+        p = _make_pipeline()
+        counters = self._counters()
+        plan = build_plan({"query_mode": "hybrid"})
+        p._retrieve_by_plan("q", {"high_level_keywords": ["教育"]}, plan, counters)
+        assert sum(counters.values()) == 4
+        assert counters["entity_graph"] == 1
+        assert counters["relation_graph"] == 1
+
+    def test_relation_call_counted_even_when_empty(self):
+        """relation_chunks 即使召回为空也算一次真实调用"""
+        p = _make_pipeline()
+        p.graph_retriever.relation_chunks.return_value = []
+        counters = self._counters()
+        plan = build_plan({"query_mode": "hybrid"})
+        p._retrieve_by_plan("q", {"high_level_keywords": []}, plan, counters)
+        assert counters["relation_graph"] == 1
+
+    def test_retry_accumulates_calls_across_rounds(self):
+        """Case3：hybrid 每轮 4 次，重试 1 次 → 2 轮 / 8 次调用"""
+        p = _make_pipeline()
+        p.max_retry = 1
+        p.evidence_judge.judge.side_effect = [
+            EvidenceJudgement(sufficient=False, missing=["缺经费"]),
+            EvidenceJudgement(sufficient=True, missing=[]),
+        ]
+        p.query_rewriter.rewrite.return_value = RewrittenQuery(query="改写后")
+        # hybrid plan → 每轮 dense+bm25+entity_graph+relation = 4
+        p.fixed_plan = build_plan({"query_mode": "hybrid"})
+
+        result = p.query("陈嘉庚创办厦门大学的经过和背景？")
+        assert result["retrieval_rounds"] == 2
+        assert result["retrieval_calls"] == 8
+        assert result["retrieval_call_detail"]["dense"] == 2
+
+    def test_router_reduces_calls_naive_vs_hybrid(self):
+        """Case4：router 让 naive 走 2 次调用，hybrid 走 4 次调用"""
+        p = _make_pipeline()
+        na = self._counters()
+        hy = self._counters()
+        p._retrieve_by_plan("q", {"high_level_keywords": []},
+                            build_plan({"query_mode": "naive"}), na)
+        p._retrieve_by_plan("q", {"high_level_keywords": []},
+                            build_plan({"query_mode": "hybrid"}), hy)
+        assert sum(na.values()) == 2
+        assert sum(hy.values()) == 4
+
+    def test_trace_contains_calls_and_detail(self):
+        """trace 同时记录 rounds / calls / call_detail"""
+        p = _make_pipeline()
+        result = p.query("陈嘉庚创办厦门大学的经过？")
+        trace = result["trace"]
+        assert trace["retrieval_rounds"] == result["retrieval_rounds"]
+        assert trace["retrieval_calls"] == result["retrieval_calls"]
+        assert "dense" in trace["retrieval_call_detail"]
