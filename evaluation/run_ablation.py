@@ -143,7 +143,7 @@ def _print_table(summaries: List[Dict]):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RAG 六组消融评估")
+    parser = argparse.ArgumentParser(description="RAG 七组单变量消融评估")
     parser.add_argument("--dataset", default=str(DEFAULT_DATASET))
     parser.add_argument("--only", default=None, help="只跑指定 key 的一组")
     parser.add_argument("--limit", type=int, default=None)

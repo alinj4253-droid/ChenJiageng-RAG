@@ -1,7 +1,7 @@
 # 评估数据集
 
 `qa_eval.json` 是一套随仓库分发的、脱敏精简的 RAG 评估集（共 12 题），用于复现
-六组消融实验（`python -m evaluation.run_ablation`）。题目均围绕语料《陈嘉庚传》，
+七组单变量消融实验（`python -m evaluation.run_ablation`）。题目均围绕语料《陈嘉庚传》，
 不含任何隐私或密钥信息。
 
 ## 字段说明

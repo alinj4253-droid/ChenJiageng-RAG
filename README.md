@@ -323,22 +323,40 @@ python -m evaluation.run_ablation
 | Retry Rate | 证据不足触发补检的题目比例 |
 
 > 当前评估集 `evaluation/datasets/qa_eval.json` 尚未做 chunk 级人工 `relevant_chunks`
-> 标注，因此检索指标为 **keyword proxy**，仅用于**架构版本之间的相对消融比较**。
-> 一旦为题目补充 `relevant_chunks` 字段，`evaluation/metrics.py` 会自动切换到标准
-> chunk 级 Recall@5 / Recall@10 / MRR（详见 `evaluation/datasets/README.md`）。
-> 具体数值请以本地运行结果为准（LLM 生成有温度随机性，不在 README 固化数字）。
+> 标注，因此检索指标为 **keyword proxy**（列名为 Coverage/MRR Proxy），仅用于
+> **架构版本之间的相对消融比较**；拒答题各组均 100% 正确拒答。一旦补充人工标注，
+> `evaluation/metrics.py` 会自动切换到标准 chunk 级 Recall@5 / Recall@10 / MRR。
 
-**要讲的两个工程故事（而非“全部指标涨一点”）：**
+**实测结果（本机、`qa_eval.json` 12 题、单次运行；可用 `python -m evaluation.run_ablation` 复现）：**
 
-- **简单 Query**：Agent Router 判定为 naive/local 后**跳过不必要的 Graph / Relation
-  检索**，Retrieval Calls 与 Latency 随之下降——这是路由省成本的直接证据。
-- **复杂 Query**：Evidence Judge 发现证据不足 → Query Rewrite + Bounded Retry 补检，
-  Answer Keyword Coverage / MRR Proxy 改善——这是有限重试的价值。
+| Profile | Cov@5 | Cov@10 | MRR Proxy | Ans Coverage | Avg Latency | Avg Rounds | Avg Calls | Retry Rate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| A Dense Only | 0.742 | 0.808 | 0.812 | 0.535 | 3.87s | 1.00 | 1.00 | 0% |
+| B + BM25 | 0.708 | 0.808 | 0.746 | 0.417 | 3.93s | 1.00 | 2.00 | 0% |
+| C + Entity Graph | 0.683 | 0.808 | 0.743 | 0.403 | 5.33s | 1.00 | 3.00 | 0% |
+| D + Relation Retrieval | 0.658 | 0.808 | 0.760 | 0.424 | 4.77s | 1.00 | 4.00 | 0% |
+| E + Rerank (Full Fixed RAG) | 0.658 | 0.808 | 0.760 | 0.493 | 5.42s | 1.00 | 4.00 | 0% |
+| F Agent Router | 0.717 | 0.808 | 0.710 | 0.451 | 4.77s | 1.00 | **2.67** | 0% |
+| G Agent Router + Retry | 0.683 | 0.792 | **0.850** | **0.535** | 9.93s | 1.75 | 4.33 | 75% |
 
-**局限（如实说明）**：公开轻量评估集题量小、单次运行，LLM 生成存在随机性；在
-keyword-proxy 口径下 Dense 基线偏强（答案多为高频实体词，纯向量即可命中），
-BM25/图谱经 RRF 融合后可能小幅稀释 Dense 前排排名；Router“简单问题降延迟”的收益
-取决于问题分布。要得到统计显著结论，需扩大题库、补充 chunk 级人工标注并多次运行取均值。
+**结论（如实报告，围绕两个工程问题）：**
+
+- **Agent Router 的价值 = 省调用（E → F）**：固定全量 RAG（E）每轮调用 4 个 Retriever；
+  Agent Router（F）按 query_mode 为简单查询跳过 Graph/Relation，**平均 Calls 从 4.00 降到
+  2.67（约 −33%）**，延迟 5.42s → 4.77s，而检索/回答质量基本保持（Cov@5 0.658 → 0.717，
+  Ans Coverage 0.493 → 0.451）。说明“简单查询不再无脑调用所有 Retriever”。
+- **Evidence Retry 的价值 = 补证据（F → G）**：开启证据裁判 + 有限重试后，**MRR Proxy 从
+  0.710 升到 0.850、Ans Coverage 从 0.451 回到 0.535（全场最高）**；代价是 Calls 2.67 → 4.33、
+  Rounds 1.00 → 1.75、延迟约翻倍（4.77s → 9.93s），75% 的题目触发补检。即只在证据不足时
+  用可控的额外延迟/调用换取更完整的证据。
+- **Calls 统计口径正确**：A=1、B=2、C=3、D/E=4 严格对应启用的 Retriever 数量；F 因路由降到
+  2.67；G 因重试升到 4.33。这与“一轮可能调用多个 Retriever”一致，而非把 rounds 当 calls。
+- **拒答底线稳定**：7 组对语料外问题均 100% 正确拒答。
+
+**局限（不夸大）**：仅 12 题、单次运行，LLM 生成有温度随机性，组间小差距不宜过度解读；在
+keyword-proxy 口径下 Dense 基线偏强（答案多为高频实体词，纯向量即可命中），BM25/图谱经 RRF
+融合后可能小幅稀释 Dense 前排排名。要得到统计显著结论，需扩大题库、补充 chunk 级人工标注并
+多次运行取均值。
 
 ---
 
