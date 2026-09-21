@@ -236,11 +236,31 @@ class TestRoutingIntegration:
         assert applied_hybrid is True
         p.reranker.rerank.assert_called_once()
 
-    def test_short_question_defaults_naive(self):
-        """短问题跳过 LLM 分析，默认 naive 模式"""
+    def test_short_question_still_calls_analyzer(self):
+        """短问题不再按长度 shortcut，统一交给 QueryAnalyzer"""
         p = _make_pipeline()
-        analysis = p._analyze("陈嘉庚是谁")  # 5 字
-        assert analysis["query_mode"] == "naive"
+        # 5 字短问题：长度不再等价于 naive，必须真正调用 LLM 分析
+        analysis = p._analyze("陈嘉庚出生哪年？")
+        p.query_analyzer.analyze.assert_called_once()
+        # mock analyzer 默认返回 hybrid（短问题长度不再决定 query_mode）
+        assert analysis["query_mode"] == "hybrid"
+
+    @pytest.mark.parametrize("short_query", [
+        "陈嘉庚出生哪年？",          # 短事实问题
+        "陈嘉庚和李光前什么关系？",    # 短但属实体关系查询
+        "教育救国思想是什么？",       # 短但属 global/semantic
+    ])
+    def test_short_queries_all_go_through_analyzer(self, short_query):
+        """三类短 query 都必须经过 QueryAnalyzer，不被长度截断"""
+        p = _make_pipeline()
+        p._analyze(short_query)
+        p.query_analyzer.analyze.assert_called_once()
+
+    def test_empty_question_rejected(self):
+        """空 / 全空格输入属于非法输入校验，不进入检索"""
+        p = _make_pipeline()
+        with pytest.raises(ValueError):
+            p._analyze("   ")
         p.query_analyzer.analyze.assert_not_called()
 
     def test_long_question_calls_analyzer(self):
@@ -261,8 +281,13 @@ class TestEvidenceJudgeIntegration:
         assert result["evidence_judgement"]["sufficient"] is True
 
     def test_naive_question_skips_judge(self):
-        """短问题（naive）不调用证据裁判"""
+        """naive 模式（由 QueryAnalyzer 判定，而非问题长度）不调用证据裁判"""
         p = _make_pipeline()
+        # 显式让 analyzer 判定为 naive：路由后 use_evidence_judge=False
+        p.query_analyzer.analyze.return_value = {
+            "original_query": "陈嘉庚是谁", "low_level_keywords": ["陈嘉庚"],
+            "high_level_keywords": [], "query_mode": "naive", "reason": "mock naive",
+        }
         result = p.query("陈嘉庚是谁")
         p.evidence_judge.judge.assert_not_called()
         assert result["evidence_judgement"] is None

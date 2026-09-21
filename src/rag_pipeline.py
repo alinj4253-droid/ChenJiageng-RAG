@@ -96,16 +96,17 @@ class RAGPipeline:
     # 查询分析
     # ------------------------------------------------------------------
     def _analyze(self, question: str) -> Dict:
-        """查询分析；很短的事实问题跳过 LLM，直接判为 naive 以降低延迟"""
-        if len(question) < 15:
-            return {
-                'original_query': question,
-                'low_level_keywords': [],
-                'high_level_keywords': [],
-                'query_mode': 'naive',
-                'reason': '短问题跳过LLM分析，按简单事实查询处理',
-            }
-        return self.query_analyzer.analyze(question)
+        """
+        查询分析。
+
+        所有非空用户 Query 统一交给 QueryAnalyzer 由 LLM 判定 query_mode，
+        不再按“问题长度”做 naive 启发式 shortcut——query 长度与难度没有可靠
+        对应关系（如“陈嘉庚和李光前什么关系？”很短却属实体关系查询）。
+        仅保留空输入 / 全空格这类非法输入校验。
+        """
+        if not question or not question.strip():
+            raise ValueError("用户问题不能为空")
+        return self.query_analyzer.analyze(question.strip())
 
     def _resolve_plan(self, analysis: Dict) -> RetrievalPlan:
         """消融固定 Plan 优先；否则按路由开关决定 Router 还是固定 hybrid"""
