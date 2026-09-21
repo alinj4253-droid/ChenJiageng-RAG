@@ -3,15 +3,19 @@
 
     python -m evaluation.run_ablation
 
-六组方案（见 evaluation/profiles.py）：
-    Dense / Dense+BM25 / +KG / +Rerank / Agent Router / Agent Router + Retry
+七组单变量递进方案（见 evaluation/profiles.py）：
+    A Dense Only / B +BM25 / C +Entity Graph / D +Relation Retrieval /
+    E +Rerank (Full Fixed RAG) / F Agent Router / G Agent Router + Retry
 
 指标：
     Recall@5、Recall@10、MRR、Answer Accuracy、
-    Avg Latency、Avg Retrieval Calls、Retry Rate
+    Avg Latency、Avg Retrieval Rounds、Avg Retrieval Calls、Retry Rate
 
 结果写入 evaluation/results/<key>.json，并在 results/summary_table.json
 汇总；控制台打印对比表。
+
+注意：检索指标在缺少人工 relevant_chunks 标注时为 keyword-proxy 口径，
+详见 evaluation/metrics.py 与 evaluation/datasets/README.md。
 
 可选参数：
     --dataset PATH   指定评估数据集（默认 evaluation/datasets/qa_eval.json）
