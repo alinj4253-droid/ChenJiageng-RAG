@@ -39,3 +39,7 @@ Thumbs.db
 
 # 运行期结构化 trace 日志
 logs/
+
+# 消融运行产物（由 evaluation.run_ablation 本地生成，不入库；仅保留 .gitkeep）
+evaluation/results/*.json
+!evaluation/results/.gitkeep

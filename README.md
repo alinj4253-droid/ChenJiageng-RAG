@@ -7,7 +7,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg)](https://fastapi.tiangolo.com/)
-[![tests](https://img.shields.io/badge/tests-115%20passed-success.svg)](#)
+[![tests](https://github.com/alinj4253-droid/ChenJiageng-RAG/actions/workflows/tests.yml/badge.svg)](https://github.com/alinj4253-droid/ChenJiageng-RAG/actions/workflows/tests.yml)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](#)
 
 ---
@@ -37,7 +37,7 @@ Query Analysis
 
 | 能力 | 技术实现 |
 |---|---|
-| **Retrieval Router** | 规则 + LLM 把问题分为 `naive / local / global / hybrid` 四类，输出显式 `RetrievalPlan` 决定启用哪些检索器与是否精排/裁判；短问题（<15 字）跳过 LLM 直接走轻量检索以降延迟 |
+| **Retrieval Router** | 规则 + LLM 把问题分为 `naive / local / global / hybrid` 四类，输出显式 `RetrievalPlan` 决定启用哪些检索器与是否精排/裁判；**所有非空 Query 都先经 QueryAnalyzer**，不再用“问题长度”做 naive 启发式（长度与难度无可靠对应） |
 | **多路混合检索** | BGE 向量语义检索（FAISS）+ BM25 关键词检索（jieba 分词）+ 知识图谱实体检索，按 Plan 动态组合 |
 | **图谱实体检索** | 实体精确/别名匹配 + 向量匹配，**双向邻接表**两跳权重衰减 BFS 子图扩展（边带 `outgoing/incoming` 方向，不丢失关系语义） |
 | **图谱关系检索** | 对 `global / hybrid` 问题，用 high-level 关键词检索 **relation 向量索引**（FAISS），经三元组 `source_chunks` 召回关系语义证据 |
@@ -48,7 +48,7 @@ Query Analysis
 | **谨慎生成** | 重试后证据仍不足时，向生成器注入“只依据材料、不编造、无据明说”的约束 |
 | **增量滚动摘要记忆** | 仅对滑出近期窗口（6 条）的旧消息做一次摘要，用 `summarized_until_message_id` 游标保证每条消息只摘要一次，避免重复摘要 |
 | **结构化 Trace** | 每次 query 以 JSONL 记录 query_mode、检索 Plan、候选/精排文档数、证据是否充分、重试次数与各阶段延迟（`logs/rag_trace.jsonl`） |
-| **消融评估** | 一键运行 6 组消融（Dense / +BM25 / +KG / +Rerank / Agent Router / Agent Router+Retry），输出 Recall@K、MRR、Answer Accuracy、Latency、Retrieval Calls、Retry Rate |
+| **消融评估** | 一键运行 **7 组单变量递进消融**（Dense → +BM25 → +Entity Graph → +Relation → +Rerank → Agent Router → Agent Router+Retry），输出 Keyword Recall Proxy / MRR Proxy / Answer Keyword Coverage / Latency / Retrieval Rounds / Retrieval Calls / Retry Rate |
 | **流式输出** | SSE 打字机效果，后台异步生成，实时推送“检索 / 裁判 / 改写重试”状态 |
 | **引用溯源 / 抗幻觉** | 答案附书名、章节与原文片段；对语料外问题礼貌拒答 |
 
@@ -61,7 +61,7 @@ Query Analysis
                             │
                             ▼
                   ┌───────────────────┐
-                  │  Query Analysis   │  短问题(<15字)跳过LLM → naive
+                  │  Query Analysis   │  所有 Query 经 LLM 判定 query_mode
                   └───────────────────┘
                             │
                             ▼
@@ -149,7 +149,7 @@ Query Analysis
 | **对话存储** | SQLite + SQLAlchemy ORM |
 | **前端** | 原生 HTML / JavaScript + vis-network + marked.js + DOMPurify |
 | **流式传输** | SSE（Server-Sent Events） |
-| **测试 / 评估** | pytest（全部 mock，不依赖真实模型/API）；内置 6 组消融脚本 |
+| **测试 / 评估** | pytest（全部 mock，不依赖真实模型/API）；内置 7 组单变量消融脚本 |
 
 ---
 
@@ -184,8 +184,8 @@ ChenJiageng-RAG/
 │   └── evaluator.py            # LLM-as-Judge 评估（可选）
 ├── evaluation/                 # 端到端消融评估
 │   ├── datasets/qa_eval.json   # 随仓库分发的 12 题精简评估集
-│   ├── profiles.py             # 6 组消融配置
-│   ├── metrics.py             # Recall@K / MRR / Answer Accuracy 指标
+│   ├── profiles.py             # 7 组单变量消融配置
+│   ├── metrics.py             # Keyword Recall/MRR Proxy、Answer Keyword Coverage 指标
 │   ├── run_ablation.py         # 一键消融入口
 │   └── results/                # 消融结果 JSON（运行后生成）
 ├── tests/                      # pytest 测试（LLM/检索全部 mock）
@@ -272,8 +272,8 @@ python -m uvicorn src.app:app --host 0.0.0.0 --port 8000
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/chat` | 同步问答（返回含 query_mode、retrieval_plan、evidence_sufficient、retry_count、trace） |
-| POST | `/api/chat/stream` | SSE 流式问答（推送 status / token / done 事件） |
+| POST | `/api/chat` | **单轮同步** RAG 查询；不维护完整会话记忆（不传 history），返回含 query_mode、retrieval_plan、evidence_sufficient、retry_count、retrieval_calls、trace |
+| POST | `/api/chat/stream` | **完整多轮聊天主链路（SSE）**：维护 Session 持久化、近期窗口、增量滚动摘要，支持流式 token 输出与状态推送 |
 | GET | `/api/sessions` | 会话列表 |
 | GET | `/api/sessions/{id}/messages` | 会话历史消息 |
 | POST | `/api/sessions` | 新建会话 |
@@ -285,7 +285,7 @@ python -m uvicorn src.app:app --host 0.0.0.0 --port 8000
 
 ## 📊 消融评估（可复现）
 
-一键运行 6 组方案对比：
+一键运行 7 组**单变量递进**消融：
 
 ```bash
 python -m evaluation.run_ablation
@@ -293,71 +293,71 @@ python -m evaluation.run_ablation
 
 可选参数：`--only <key>`（只跑某组）、`--limit N`（只取前 N 题）、
 `--dataset PATH`（自定义评估集）。结果写入 `evaluation/results/<key>.json`，
-汇总写入 `evaluation/results/summary_table.json`。
+汇总写入 `evaluation/results/summary_table.json`（`results/` 为运行产物，
+由脚本生成，不随仓库提交）。
 
-六组配置（前四组为固定工作流，后两组为 Agentic）：
+七组配置（每组相对前一组**只新增一个主要能力**，便于区分各模块独立贡献）：
 
-| 组 | key | 检索器组合 | Agent 决策 |
+| 组 | key | 相对前一组新增的能力 | Agent 决策 |
 |---|---|---|---|
-| A | `dense` | 仅 Dense | 无 |
-| B | `dense_bm25` | Dense + BM25 | 无 |
-| C | `plus_kg` | Dense + BM25 + 图谱实体 | 无 |
-| D | `plus_rerank` | Dense + BM25 + 实体 + 关系 + Rerank | 无（最强固定工作流） |
-| E | `agent_router` | Router 按 query_mode 动态选路 | 路由（不裁判/不重试） |
-| F | `agent_retry` | Router 动态选路 | 路由 + 证据裁判 + 有限重试 |
+| A | `dense` | 仅 Dense（baseline） | 无 |
+| B | `dense_bm25` | + BM25 关键词召回 | 无 |
+| C | `entity_graph` | + 实体图谱（双向子图扩展） | 无 |
+| D | `entity_relation` | + 关系向量检索 | 无 |
+| E | `full_fixed_rag` | + Cross-Encoder Rerank | 无（最强固定工作流） |
+| F | `agent_router` | — | Router 动态选路（不裁判/不重试） |
+| G | `agent_retry` | — | 路由 + 证据裁判 + 有限重试 |
 
-指标：**Recall@5 / Recall@10 / MRR**（检索，在**精排前的融合候选池（10 个）**上
-计算，衡量“检索 + 融合”阶段的召回与排序；Cross-Encoder 精排不增加召回，其价值由
-Answer Accuracy 体现）、**Answer Accuracy**（关键词命中与拒答成功率，确定性口径）、
-**Avg Latency**、**Avg Retrieval Calls**、**Retry Rate**。
+> 关键：**Relation Retrieval 与 Rerank 被拆成 D、E 两步**——它们不再在同一步
+> 同时引入，因此某组提升时能判断增益究竟来自关系检索还是精排。
 
-> 评估集 `evaluation/datasets/qa_eval.json` 含 12 题（事实/关系/概述/拒答）。
-> 当前检索指标采用 **keyword-proxy 口径**（top-K chunk 文本对答案关键词的覆盖），
-> 因为数据集尚未做 chunk 级人工标注；一旦为题目补充 `relevant_chunks` 字段，
-> 指标会自动切换到标准 chunk 级 Recall/MRR，详见 `evaluation/datasets/README.md`。
+**指标口径（严谨、不夸大）：**
 
-**实测结果（本机、12 题单次运行；以 `evaluation/results/summary_table.json` 为准）：**
+| 指标 | 含义 |
+|---|---|
+| Keyword Recall Proxy / MRR Proxy | 检索侧：top-K chunk 文本对 `answer_keywords` 的覆盖 / 首个命中排名倒数。**这是 keyword proxy，不是人工标注的 Recall@K / MRR** |
+| Answer Keyword Coverage | 生成侧：答案对 `answer_keywords` 的命中比例；拒答题看是否正确拒答（确定性，不依赖 LLM 裁判） |
+| Avg Latency | 单题端到端耗时 |
+| Avg Retrieval Rounds | 检索轮次（每轮可能调用多个 Retriever；含重试） |
+| Avg Retrieval Calls | **实际 Retriever 调用总次数**（dense/bm25/entity_graph/relation_graph 分别计数），区别于 rounds——1 轮 ≠ 1 次调用 |
+| Retry Rate | 证据不足触发补检的题目比例 |
 
-<!-- ABLATION_TABLE_START -->
-| Method | Recall@5 | Recall@10 | MRR | Accuracy | Avg Latency | Avg Calls | Retry% |
-|---|---|---|---|---|---|---|---|
-| Dense | 0.742 | 0.808 | 0.812 | 0.556 | 3.89s | 1.00 | 0.0% |
-| Dense+BM25 | 0.708 | 0.808 | 0.746 | 0.472 | 3.47s | 1.00 | 0.0% |
-| +KG | 0.683 | 0.808 | 0.743 | 0.333 | 3.68s | 1.00 | 0.0% |
-| +Rerank | 0.658 | 0.808 | 0.810 | 0.514 | 6.83s | 1.00 | 0.0% |
-| Agent Router | 0.717 | 0.808 | 0.760 | 0.451 | 6.32s | 1.00 | 0.0% |
-| Agent Router + Retry | **0.700** | 0.792 | **0.863** | 0.514 | 11.56s | 1.58 | 58.3% |
-<!-- ABLATION_TABLE_END -->
+> 当前评估集 `evaluation/datasets/qa_eval.json` 尚未做 chunk 级人工 `relevant_chunks`
+> 标注，因此检索指标为 **keyword proxy**，仅用于**架构版本之间的相对消融比较**。
+> 一旦为题目补充 `relevant_chunks` 字段，`evaluation/metrics.py` 会自动切换到标准
+> chunk 级 Recall@5 / Recall@10 / MRR（详见 `evaluation/datasets/README.md`）。
+> 具体数值请以本地运行结果为准（LLM 生成有温度随机性，不在 README 固化数字）。
 
-**结论（如实报告，含不符合预期之处）：**
+**要讲的两个工程故事（而非“全部指标涨一点”）：**
 
-- **MRR 是 Agentic Retry 最稳定的收益**：Agent Router+Retry 的 MRR=0.863 全场最高，
-  比最强固定工作流 +Rerank（0.810）高约 5 个百分点；在两次独立运行中该组 MRR 均为最高
-  （0.853 / 0.863）。说明证据不足时的改写补检能把正确证据**排到更靠前的位置**。
-- **Recall@10 各组接近（0.79–0.81）**：融合候选池的召回上界相当，说明瓶颈不在“有没有
-  召回”，而在“排序是否靠前（MRR）”与“证据是否被判定充分”，这正是裁判 + 重试作用之处。
-- **拒答成功率全部为 1.0**：6 组都能正确拒答 2 道语料外问题，抗幻觉底线稳定。
-- **成本清晰可观测**：Retry 组平均检索 1.58 次、58.3% 的复杂问题触发补检，平均延迟
-  约为 Dense 的 3 倍（3.89s → 11.56s）；重试上界（默认 1 次）使该成本可控。
-- **局限（不夸大）**：① 仅 12 题、单次运行，LLM 生成存在温度随机性，Recall@5 与
-  Accuracy 的组间差距多在 1 题（≈0.083）以内，不宜过度解读；② 在 keyword-proxy 口径下
-  Dense 基线偏强（答案多为高频实体词，纯向量即可命中），BM25/图谱经 RRF 融合后反而小幅
-  稀释了 Dense 的前排排名；③ Router“简单问题降延迟”的收益在本数据集不明显（长问题占多数，
-  且查询分析本身要调用一次 LLM）。要得到统计显著的结论，需要扩大题库、为题目补充 chunk 级
-  `relevant_chunks` 人工标注并多次运行取均值。
+- **简单 Query**：Agent Router 判定为 naive/local 后**跳过不必要的 Graph / Relation
+  检索**，Retrieval Calls 与 Latency 随之下降——这是路由省成本的直接证据。
+- **复杂 Query**：Evidence Judge 发现证据不足 → Query Rewrite + Bounded Retry 补检，
+  Answer Keyword Coverage / MRR Proxy 改善——这是有限重试的价值。
+
+**局限（如实说明）**：公开轻量评估集题量小、单次运行，LLM 生成存在随机性；在
+keyword-proxy 口径下 Dense 基线偏强（答案多为高频实体词，纯向量即可命中），
+BM25/图谱经 RRF 融合后可能小幅稀释 Dense 前排排名；Router“简单问题降延迟”的收益
+取决于问题分布。要得到统计显著结论，需扩大题库、补充 chunk 级人工标注并多次运行取均值。
 
 ---
 
-## ✅ 测试
+## ✅ 测试与 CI
 
-所有测试用 mock 隔离 LLM、FAISS 与网络，无需 API Key 或模型即可运行：
+所有测试用 mock 隔离 LLM、FAISS、Embedding 与网络，无需 API Key、模型权重或外部服务即可运行：
 
 ```bash
-python -m pytest -q
+pip install -r requirements.txt -r requirements-dev.txt
+pytest -q
 ```
 
+push / Pull Request 到 `main` 时，GitHub Actions 会自动在 ubuntu-latest 上安装依赖并运行
+`pytest -q`（见顶部绿色 tests badge 与 `.github/workflows/tests.yml`）。需要真实环境的
+集成测试请标记 `@pytest.mark.integration`，默认 CI 不运行。
+
 覆盖：查询分析、检索路由、证据裁判、查询改写、有限重试循环（含死循环防护）、
-混合检索融合、图谱双向遍历与关系检索、增量滚动摘要、会话存储、评估指标、trace 落盘等。
+真实 retrieval_calls 统计、7 组单变量消融 profile、混合检索融合、图谱双向遍历与关系检索、
+增量滚动摘要、会话存储、单轮/流式聊天接口职责、评估指标、trace 落盘等。
 
 ---
 
@@ -370,7 +370,9 @@ python -m pytest -q
 | `MAX_RETRIEVAL_RETRY` | `1` | 证据不足时最多补检次数（构造 Pipeline 时可传 `max_retry=0` 关闭） |
 | `ENABLE_RELATION_RETRIEVAL` | `True` | global/hybrid 模式是否启用关系向量检索 |
 | `ENABLE_TRACE_LOG` | `True` | 是否写结构化 trace 到 `logs/rag_trace.jsonl` |
-| `RECENT_WINDOW` | `6` | 对话短期记忆窗口（消息条数） |
+| `RECENT_WINDOW` | `6` | 对话短期记忆窗口（消息条数），app/generator/db 统一从这里读取 |
+| `ENTITY_GRAPH_WEIGHT` | `0.2` | 实体图谱检索在 Weighted RRF 中的权重 |
+| `RELATION_GRAPH_WEIGHT` | `0.2` | 关系向量检索在 Weighted RRF 中的权重（独立于实体图谱权重） |
 
 ---
 
