@@ -1,15 +1,22 @@
 """
-RAG主Pipeline
+RAG主Pipeline（Workflow-first Agentic RAG）
 
+固定主流程：
 查询理解(QueryAnalyzer)
   → 检索路由(RetrievalRouter, query_mode → RetrievalPlan)
-  → 按 Plan 执行 Dense / BM25 / Graph 多路检索
+  → 按 Plan 执行 Dense / BM25 / Entity Graph / Relation 多路检索
   → Weighted RRF 融合
   → Cross-Encoder Rerank（按 Plan）
+  → Evidence Judge
+  → （证据不足且未超上限）Query Rewrite + Bounded Retry
   → 生成答案
 
-Agentic 决策只出现在 query_mode（LLM 判断）这一处，
-检索路径本身是确定性规则映射，保证可控、可测、便于消融。
+Agentic 决策点共三处（其余步骤为确定性代码，保证可控、可测、便于消融）：
+  1. Query Classification / Routing：LLM 在 QueryAnalyzer 判定 query_mode，
+     再由确定性 RetrievalRouter 映射为 RetrievalPlan；
+  2. Evidence Sufficiency Judgement：LLM 判断证据是否足以回答原问题；
+  3. Query Rewrite / Bounded Retry：证据不足时按缺失点改写检索 query 并补检，
+     有严格上界、重复即停，杜绝死循环。
 """
 import time
 from typing import Dict, List, Optional, Tuple
