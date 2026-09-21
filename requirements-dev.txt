@@ -1,0 +1,3 @@
+# 测试 / CI 开发依赖（运行 `pytest` 与 FastAPI TestClient 所需）
+pytest>=8.0.0
+httpx>=0.27.0
