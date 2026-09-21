@@ -61,7 +61,13 @@ def health_check():
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
-    """聊天接口"""
+    """单轮同步 RAG 查询接口。
+
+    职责边界：每次请求独立执行「检索 → 生成」，**不把会话历史传入生成器**，
+    即不维护完整 Conversation Memory。它仍会把问答写入会话表（便于记录/回看），
+    但回答不依赖上文。适合一次性问答、批量调用或对延迟敏感的场景。
+    多轮有上下文的聊天请使用 ``/api/chat/stream``。
+    """
     db = get_db()
     pipeline = get_pipeline()
 
@@ -93,7 +99,13 @@ def chat(req: ChatRequest):
 
 @app.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest):
-    """流式聊天接口（SSE）：后台生成，前端断开不打断"""
+    """完整多轮聊天主接口（SSE 流式）。
+
+    职责边界：这是前端聊天主链路，维护 **完整会话记忆**——
+    Session 持久化、近期对话窗口（RECENT_WINDOW）、增量滚动摘要，
+    并以 SSE 流式输出 token。后台异步生成，前端断开不打断。
+    与 ``/api/chat``（单轮、无上下文）明确分工，不复用同一套会话状态。
+    """
     db = get_db()
     pipeline = get_pipeline()
 
