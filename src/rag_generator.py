@@ -7,7 +7,7 @@ from typing import List, Dict, Optional
 
 from src.llm_client import get_client
 from src.prompts import RAG_SYSTEM, RAG_USER
-from src.config import MAX_CONTEXT_CHUNKS, MAX_CONTEXT_CHARS
+from src.config import MAX_CONTEXT_CHUNKS, MAX_CONTEXT_CHARS, RECENT_WINDOW
 
 
 # 证据最终不足时追加给生成器的谨慎指令
@@ -150,8 +150,8 @@ class RAGGenerator:
             # 摘要拼接进 system prompt 作为长期记忆
             for sm in summary_messages:
                 messages[0]['content'] += '\n\n' + sm['content']
-            # 最近 3 轮对话（6 条消息）作为短期上下文
-            for msg in recent_turns[-6:]:
+            # 最近 RECENT_WINDOW 条对话作为短期上下文（集中配置，不再手写魔法数）
+            for msg in recent_turns[-RECENT_WINDOW:]:
                 messages.append({'role': msg['role'], 'content': msg['content']})
         messages.append({'role': 'user', 'content': prompt})
 

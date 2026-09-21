@@ -71,10 +71,11 @@ KG_RELATION_TOP_K = 10        # 图谱关系检索候选数
 FINAL_TOP_K = 5               # 最终送入LLM的上下文块数（从8减到5，提速）
 RERANK_TOP_N = 10             # 送入重排的候选数（从20减到10，提速）
 
-# 融合权重
+# 融合权重（两路图谱检索是独立来源，分别配置权重，即便当前数值相同）
 VECTOR_WEIGHT = 0.5
 BM25_WEIGHT = 0.3
-KG_WEIGHT = 0.2
+ENTITY_GRAPH_WEIGHT = 0.2   # 实体图谱检索（双向子图扩展）在 Weighted RRF 中的权重
+RELATION_GRAPH_WEIGHT = 0.2  # 关系向量检索在 Weighted RRF 中的权重
 
 # ============ 嵌入模型 ============
 EMBED_MODEL_NAME = "BAAI/bge-base-zh-v1.5"

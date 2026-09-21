@@ -32,7 +32,8 @@ from src.config import (
     GRAPH_TOP_K,
     VECTOR_WEIGHT,
     BM25_WEIGHT,
-    KG_WEIGHT,
+    ENTITY_GRAPH_WEIGHT,
+    RELATION_GRAPH_WEIGHT,
     ENABLE_AGENT_ROUTING,
     ENABLE_EVIDENCE_JUDGE,
     MAX_RETRIEVAL_RETRY,
@@ -157,7 +158,7 @@ class RAGPipeline:
             graph_result = self.graph_retriever.search(query)
             graph_chunks = graph_result.get('chunks', [])
             graph_entities = graph_result.get('entities', [])
-            ranked_lists.append((graph_chunks, KG_WEIGHT, 'graph'))
+            ranked_lists.append((graph_chunks, ENTITY_GRAPH_WEIGHT, 'graph'))
 
         if plan.use_relation and self.use_graph:
             # 关系检索：high-level 抽象关键词走关系向量索引；
@@ -169,7 +170,7 @@ class RAGPipeline:
             )
             counters["relation_graph"] = counters.get("relation_graph", 0) + 1
             if rel_chunks:
-                ranked_lists.append((rel_chunks, KG_WEIGHT, 'graph_relation'))
+                ranked_lists.append((rel_chunks, RELATION_GRAPH_WEIGHT, 'graph_relation'))
 
         return ranked_lists, graph_entities
 

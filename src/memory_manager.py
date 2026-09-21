@@ -15,12 +15,13 @@ from typing import Optional
 
 from src.llm_client import get_client
 from src.prompts import ROLLING_SUMMARY_SYSTEM, ROLLING_SUMMARY_USER
+from src.config import RECENT_WINDOW
 
 
 class RollingSummaryManager:
     """增量滚动摘要器"""
 
-    def __init__(self, db, client=None, recent_window: int = 6):
+    def __init__(self, db, client=None, recent_window: int = RECENT_WINDOW):
         """
         Args:
             db: DBManager 实例

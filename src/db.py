@@ -8,6 +8,8 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, F
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 
+from src.config import RECENT_WINDOW
+
 Base = declarative_base()
 
 
@@ -108,7 +110,7 @@ class DBManager:
             for m in messages
         ]
     
-    def build_chat_history(self, session_id: str, recent_window: int = 6) -> List[Dict]:
+    def build_chat_history(self, session_id: str, recent_window: int = RECENT_WINDOW) -> List[Dict]:
         """
         构建传给生成器的对话历史：长期摘要(system) + 最近 recent_window 条消息。
 
@@ -170,7 +172,7 @@ class DBManager:
         return s.summary if s and s.summary else ""
 
     def get_pending_summary_messages(self, session_id: str,
-                                     recent_window: int = 6):
+                                     recent_window: int = RECENT_WINDOW):
         """
         返回需要“增量摘要”的消息：
         位于 summarized_until_message_id 之后、且已经滑出 recent window 的消息。

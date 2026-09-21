@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.rag_pipeline import RAGPipeline
 from src.db import DBManager
+from src.config import RECENT_WINDOW
 
 # ============ 初始化 ============
 app = FastAPI(title="嘉庚智答", version="1.0.0")
@@ -115,7 +116,7 @@ async def chat_stream(req: ChatRequest):
 
     # 1. 先取历史对话（必须在本轮用户消息入库之前），
     #    否则当前问题会同时出现在 history 和最终 prompt 中，造成重复。
-    history = db.build_chat_history(session_id, recent_window=6)
+    history = db.build_chat_history(session_id, recent_window=RECENT_WINDOW)
 
     # 2. 再存本轮用户问题
     db.add_message(session_id, "user", req.message)
@@ -135,7 +136,7 @@ async def chat_stream(req: ChatRequest):
     # 增量滚动摘要器（复用 pipeline 的 LLM 客户端）
     from src.memory_manager import RollingSummaryManager
     memory_manager = RollingSummaryManager(
-        db, client=pipeline.generator.client, recent_window=6
+        db, client=pipeline.generator.client, recent_window=RECENT_WINDOW
     )
 
     # 后台生成协程：不依赖前端连接，生成完自动存库
