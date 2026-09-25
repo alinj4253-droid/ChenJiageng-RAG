@@ -6,6 +6,7 @@ import json
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -21,11 +22,20 @@ from src.prompts import KG_EXTRACT_SYSTEM, KG_EXTRACT_USER
 
 def extract_from_chunk(chunk: Dict, client=None) -> Optional[Dict]:
     """
-    从单个chunk抽取实体和关系。
-    返回: {"entities": [...], "relations": [...], "chunk_id": "..."}
+    从单个chunk抽取三元组。
+
+    LLM 原始输出为 {entities, relations}，这里将其转换为落盘格式 triples，
+    并给每条三元组的头/尾补上实体类型（head_type / tail_type），
+    与 data/kg/triples_raw.jsonl 的结构严格对齐。
+
+    返回: {
+        chunk_id, source_file, chapter,
+        triples: [{head, head_type, relation, tail, tail_type}],
+        model, timestamp
+    }；无有效三元组时返回 None。
     """
     if client is None:
-        client = get_client()  # 用全部6个可用模型
+        client = get_client()  # 用全部可用模型
 
     prompt = KG_EXTRACT_USER.format(
         max_entities=KG_MAX_ENTITIES_PER_CHUNK,
@@ -38,43 +48,49 @@ def extract_from_chunk(chunk: Dict, client=None) -> Optional[Dict]:
     if not result:
         return None
 
-    # 标准化输出
     entities = result.get('entities', [])
     relations = result.get('relations', [])
 
-    # 过滤无效实体
-    valid_entities = []
+    # 实体名 -> 标准化类型（用于给三元组头尾补类型）
+    type_map = {}
     for e in entities:
         name = e.get('name', '').strip()
         if name and len(name) <= 30:
-            valid_entities.append({
-                'name': name,
-                'type': e.get('type', 'OTHER').upper(),
-                'description': e.get('description', '')[:200],
-                'source_chunk': chunk['chunk_id'],
-            })
+            type_map[name] = e.get('type', 'OTHER').upper()
 
-    # 过滤无效关系
-    valid_relations = []
+    # 组装三元组：补头/尾类型，去重，过滤无效与自环
+    triples = []
+    seen = set()
     for r in relations:
         head = r.get('head', '').strip()
         tail = r.get('tail', '').strip()
         relation = r.get('relation', '').strip()
-        if head and tail and relation and head != tail:
-            valid_relations.append({
-                'head': head,
-                'relation': relation,
-                'tail': tail,
-                'description': r.get('description', '')[:200],
-                'source_chunk': chunk['chunk_id'],
-            })
+        if not head or not tail or not relation or head == tail:
+            continue
+        if len(head) > 30 or len(tail) > 30:
+            continue
+        key = (head, relation, tail)
+        if key in seen:
+            continue
+        seen.add(key)
+        triples.append({
+            'head': head,
+            'head_type': type_map.get(head, 'OTHER'),
+            'relation': relation,
+            'tail': tail,
+            'tail_type': type_map.get(tail, 'OTHER'),
+        })
+
+    if not triples:
+        return None
 
     return {
         'chunk_id': chunk['chunk_id'],
-        'book': chunk.get('book', ''),
+        'source_file': chunk.get('book', ''),
         'chapter': chunk.get('chapter', ''),
-        'entities': valid_entities,
-        'relations': valid_relations,
+        'triples': triples,
+        'model': getattr(client, 'last_model', '') or '',
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     }
 
 
@@ -116,7 +132,7 @@ def run_extraction(limit: Optional[int] = None, resume: bool = True, max_workers
     todo_chunks = [c for c in chunks if c['chunk_id'] not in processed]
     print(f'实际待处理: {len(todo_chunks)} 个')
 
-    stats = {'success': 0, 'failed': 0, 'total_entities': 0, 'total_relations': 0}
+    stats = {'success': 0, 'failed': 0, 'total_triples': 0}
     lock = threading.Lock()
     write_lock = threading.Lock()
     start_time = time.time()
@@ -133,8 +149,7 @@ def run_extraction(limit: Optional[int] = None, resume: bool = True, max_workers
                         f.write(json.dumps(result, ensure_ascii=False) + '\n')
                 with lock:
                     stats['success'] += 1
-                    stats['total_entities'] += len(result['entities'])
-                    stats['total_relations'] += len(result['relations'])
+                    stats['total_triples'] += len(result['triples'])
                     done = stats['success'] + stats['failed']
                     if done % 10 == 0:
                         elapsed = time.time() - start_time
@@ -163,7 +178,7 @@ def run_extraction(limit: Optional[int] = None, resume: bool = True, max_workers
     print()
     print('=== 抽取完成 ===')
     print(f'成功: {stats["success"]}, 失败: {stats["failed"]}')
-    print(f'总实体: {stats["total_entities"]}, 总关系: {stats["total_relations"]}')
+    print(f'三元组总数: {stats["total_triples"]}')
     print(f'总耗时: {elapsed/60:.1f}分钟, 平均: {elapsed/max(stats["success"]+stats["failed"],1):.1f}秒/个')
     print(f'结果保存: {output_file}')
 

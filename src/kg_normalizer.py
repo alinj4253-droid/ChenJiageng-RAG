@@ -116,15 +116,15 @@ def normalize_kg():
 
     print(f'读取 {len(raw_results)} 个chunk的抽取结果')
 
-    # 收集所有实体和关系（从relations中提取）
+    # 收集所有实体和关系（从 triples 中提取）
     all_entities = {}  # name -> entity dict
     all_relations = []
     entity_chunk_map = defaultdict(set)  # name -> set of chunk_ids
 
     for result in raw_results:
         chunk_id = result.get('chunk_id', '')
-        # 从relations中提取实体和关系
-        for t in result.get('relations', []):
+        # 从 triples 中提取实体和关系
+        for t in result.get('triples', []):
             head = normalize_entity_name(t['head'])
             tail = normalize_entity_name(t['tail'])
             head_type = normalize_entity_type(t.get('head_type', 'OTHER'))
@@ -199,8 +199,10 @@ def normalize_kg():
             if len(entity['description']) > len(merged_entities[standard]['description']):
                 merged_entities[standard]['description'] = entity['description']
             merged_entities[standard]['source_chunks'].update(entity['source_chunks'])
-            if name != standard:
-                merged_entities[standard]['aliases'].add(name)
+        # 无论新建还是已存在，只要原名与标准名不同就记录为别名
+        # （修复：标准实体首次由别名创建时，别名此前会丢失）
+        if name != standard:
+            merged_entities[standard]['aliases'].add(name)
 
     # 归并关系（去重）
     merged_relations = {}

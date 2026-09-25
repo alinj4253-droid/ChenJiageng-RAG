@@ -57,6 +57,7 @@ class LLMClient:
         self.models = preferred_models if preferred_models else ALL_ONLINE_MODELS
         self._model_idx = 0  # 轮询索引
         self._local_fallback = False  # 是否已经降级到本地
+        self.last_model = ""  # 最近一次成功调用使用的模型名（用于落盘可追溯）
 
     def _next_model(self) -> str:
         """轮询获取下一个模型"""
@@ -120,6 +121,7 @@ class LLMClient:
 
             if status == 200 and isinstance(body, dict):
                 content = body["choices"][0]["message"]["content"]
+                self.last_model = use_model
                 return content
             elif status == 429:
                 # 额度用完/限流，换模型
@@ -160,6 +162,7 @@ class LLMClient:
         }
         status, body = _http_post(url, {"Content-Type": "application/json"}, payload, timeout=120)
         if status == 200 and isinstance(body, dict):
+            self.last_model = OLLAMA_MODEL
             return body["message"]["content"]
         raise RuntimeError(f"本地Ollama调用失败: status={status}, body={body}")
 
