@@ -62,14 +62,19 @@ CHUNK_OVERLAP = 80            # 块间重叠（字）
 CHUNK_MIN_SIZE = 100          # 最小块大小（小于此值合并到前一块）
 
 # ============ 检索配置 ============
+# 三级 Top-K 拓扑（逐级收敛）：
+#   1. VECTOR_TOP_K / BM25_TOP_K / KG_*_TOP_K → 各路检索器原始召回
+#   2. RERANK_TOP_N → Weighted RRF 融合后保留的候选数（送入 Cross-Encoder 精排）
+#   3. FINAL_TOP_K  → Rerank 后保留的证据块数（Evidence Judge 与 Generation 的输入上限）
+#   4. MAX_CONTEXT_CHUNKS → 生成阶段实际送入 LLM 的 chunk 数（≤ FINAL_TOP_K）
 VECTOR_TOP_K = 20             # 向量检索候选数
 BM25_TOP_K = 20               # BM25检索候选数
 HYBRID_TOP_K = 30             # 混合检索最终候选数
 RRF_K = 60                    # RRF融合常数
 KG_ENTITY_TOP_K = 10          # 图谱实体检索候选数
 KG_RELATION_TOP_K = 10        # 图谱关系检索候选数
-FINAL_TOP_K = 5               # 最终送入LLM的上下文块数（从8减到5，提速）
-RERANK_TOP_N = 10             # 送入重排的候选数（从20减到10，提速）
+RERANK_TOP_N = 10             # RRF融合后保留的候选数（送入精排）
+FINAL_TOP_K = 5               # Rerank后保留的证据块数（Evidence Judge / Generation 输入上限）
 
 # 融合权重（两路图谱检索是独立来源，分别配置权重，即便当前数值相同）
 VECTOR_WEIGHT = 0.5
@@ -89,7 +94,7 @@ CUSTOM_DICT_FILE = DATA_DIR / "userdict.txt"
 # ============ 重排模型 ============
 RERANK_MODEL_NAME = "BAAI/bge-reranker-base"
 RERANK_MODEL_PATH = str(MODELS_DIR / "models" / "BAAI--bge-reranker-base" / "snapshots" / "master")
-RERANK_TOP_K = 8              # 重排后保留数
+# 精排后保留数由 FINAL_TOP_K 统一控制（见检索配置区），不再单独设 RERANK_TOP_K
 
 # ============ 生成配置 ============
 GEN_TEMPERATURE = 0.2
@@ -97,8 +102,10 @@ GEN_MAX_TOKENS = 1024
 GEN_TOP_P = 0.9
 
 # ============ 上下文组装配置 ============
-MAX_CONTEXT_CHUNKS = 3          # 最多送入LLM的chunk数（从5减到3，提速）
-MAX_CONTEXT_CHARS = 1200        # 上下文最大总字数（从2000减到1200，提速）
+# FINAL_TOP_K（精排输出）≥ MAX_CONTEXT_CHUNKS（生成实际使用）；
+# Evidence Judge 看全部 FINAL_TOP_K 个证据，生成时只取排名最高的 MAX_CONTEXT_CHUNKS 个。
+MAX_CONTEXT_CHUNKS = 3          # 生成阶段实际送入LLM的chunk数
+MAX_CONTEXT_CHARS = 1200        # 上下文最大总字数（按句子边界截断）
 
 # ============ 图谱抽取配置 ============
 KG_MAX_ENTITIES_PER_CHUNK = 10

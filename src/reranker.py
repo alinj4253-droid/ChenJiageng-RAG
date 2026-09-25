@@ -3,7 +3,7 @@ Reranker重排序模块
 使用BGE-reranker对检索结果重新排序，提高相关性
 """
 from typing import List, Dict
-from src.config import RERANK_TOP_K, RERANK_MODEL_PATH
+from src.config import FINAL_TOP_K, RERANK_MODEL_PATH
 
 
 class Reranker:
@@ -24,7 +24,7 @@ class Reranker:
             print('将跳过重排序步骤')
             self.model = None
 
-    def rerank(self, query: str, chunks: List[Dict], top_k: int = RERANK_TOP_K) -> List[Dict]:
+    def rerank(self, query: str, chunks: List[Dict], top_k: int = FINAL_TOP_K) -> List[Dict]:
         """
         对检索结果重排序。
 
