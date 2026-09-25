@@ -14,6 +14,7 @@
   - 拒答题：答案是否包含拒答信号（Refusal Success Rate）。
 """
 from typing import List, Dict, Optional, Tuple, Set
+import math
 
 # 拒答信号词（与语料无证据时的谨慎回答保持一致）
 REFUSAL_SIGNALS = [
@@ -47,10 +48,26 @@ def _chunk_level_metrics(retrieved: List[Dict],
             mrr = 1.0 / (i + 1)
             break
 
+    # nDCG@K：二分类相关性（relevant=1, irrelevant=0）
+    def dcg(k: int) -> float:
+        return sum(
+            1.0 / math.log2(i + 2)
+            for i, cid in enumerate(ids[:k])
+            if cid in relevant_ids
+        )
+
+    def ndcg(k: int) -> float:
+        if not relevant_ids:
+            return 0.0
+        ideal = sum(1.0 / math.log2(i + 2) for i in range(min(len(relevant_ids), k)))
+        return dcg(k) / ideal if ideal > 0 else 0.0
+
     return {
         "recall@5": recall(5),
         "recall@10": recall(10),
         "mrr": mrr,
+        "ndcg@5": ndcg(5),
+        "ndcg@10": ndcg(10),
         "ground_truth": "chunk_id",
     }
 
@@ -59,6 +76,7 @@ def _keyword_proxy_metrics(retrieved: List[Dict],
                            keywords: List[str]) -> Dict[str, float]:
     if not keywords:
         return {"recall@5": 0.0, "recall@10": 0.0, "mrr": 0.0,
+                "ndcg@5": 0.0, "ndcg@10": 0.0,
                 "ground_truth": "keyword_proxy"}
 
     def coverage(k: int) -> float:
@@ -72,10 +90,24 @@ def _keyword_proxy_metrics(retrieved: List[Dict],
             mrr = 1.0 / (i + 1)
             break
 
+    # nDCG proxy：chunk 包含任意答案关键词视为相关（二分类）
+    def dcg(k: int) -> float:
+        return sum(
+            1.0 / math.log2(i + 2)
+            for i, chunk in enumerate(retrieved[:k])
+            if _covered_keywords([chunk], keywords)
+        )
+
+    def ndcg(k: int) -> float:
+        ideal = sum(1.0 / math.log2(i + 2) for i in range(k))  # 理想：前k全相关
+        return dcg(k) / ideal if ideal > 0 else 0.0
+
     return {
         "recall@5": coverage(5),
         "recall@10": coverage(10),
         "mrr": mrr,
+        "ndcg@5": round(ndcg(5), 4),
+        "ndcg@10": round(ndcg(10), 4),
         "ground_truth": "keyword_proxy",
     }
 

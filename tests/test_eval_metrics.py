@@ -96,3 +96,49 @@ class TestAnswerAccuracy:
         score, detail = answer_accuracy("随便答", {"type": "overview",
                                                    "answer_keywords": []})
         assert score is None
+
+
+class TestNDCG:
+
+    def test_chunk_level_ndcg_perfect(self):
+        """相关 chunk 全部排在最前面 → nDCG=1.0"""
+        retrieved = [_chunk(f"c{i}", f"文本{i}") for i in range(1, 6)]
+        item = {"relevant_chunks": ["c1", "c2", "c3"]}
+        m = retrieval_metrics(retrieved, item)
+        assert m["ndcg@5"] == pytest.approx(1.0)
+        assert m["ndcg@10"] == pytest.approx(1.0)
+
+    def test_chunk_level_ndcg_partial(self):
+        """相关 chunk 排在后面 → nDCG < 1.0"""
+        retrieved = [_chunk(f"c{i}", f"文本{i}") for i in range(1, 6)]
+        item = {"relevant_chunks": ["c4", "c5"]}
+        m = retrieval_metrics(retrieved, item)
+        # c4 在 rank4, c5 在 rank5
+        # DCG@5 = 1/log2(5) + 1/log2(6) ≈ 0.431 + 0.387 = 0.818
+        # ideal = 1/log2(2) + 1/log2(3) = 1.0 + 0.631 = 1.631
+        assert m["ndcg@5"] < 1.0
+        assert m["ndcg@5"] > 0.0
+
+    def test_chunk_level_ndcg_no_hit(self):
+        retrieved = [_chunk(f"x{i}", "无关") for i in range(5)]
+        m = retrieval_metrics(retrieved, {"relevant_chunks": ["c99"]})
+        assert m["ndcg@5"] == 0.0
+        assert m["ndcg@10"] == 0.0
+
+    def test_keyword_proxy_ndcg(self):
+        """keyword-proxy 口径下也计算 nDCG"""
+        retrieved = [
+            _chunk("c1", "无关文本"),
+            _chunk("c2", "陈嘉庚 1921 创办厦门大学"),
+        ]
+        item = {"answer_keywords": ["1921", "厦门大学"]}
+        m = retrieval_metrics(retrieved, item)
+        assert "ndcg@5" in m
+        assert "ndcg@10" in m
+        # c2 在 rank2 命中 → DCG > 0
+        assert m["ndcg@5"] > 0.0
+
+    def test_empty_relevant_returns_none(self):
+        """relevant_chunks 为空列表时，回退 keyword-proxy；无关键词则返回 None"""
+        assert retrieval_metrics([_chunk("c1", "x")],
+                                 {"relevant_chunks": [], "answer_keywords": []}) is None

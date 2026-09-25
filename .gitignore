@@ -43,3 +43,6 @@ logs/
 # 消融运行产物（由 evaluation.run_ablation 本地生成，不入库；仅保留 .gitkeep）
 evaluation/results/*.json
 !evaluation/results/.gitkeep
+
+# 公开 Benchmark 数据集（由 download_benchmarks.py 下载，文件较大不入库）
+evaluation/datasets/public/
