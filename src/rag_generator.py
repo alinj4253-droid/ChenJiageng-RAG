@@ -3,11 +3,42 @@ RAG问答生成层
 上下文组装 + LLM生成 + 引用标注
 """
 import json
+import re
 from typing import List, Dict, Optional
 
 from src.llm_client import get_client
 from src.prompts import RAG_SYSTEM, RAG_USER
 from src.config import MAX_CONTEXT_CHUNKS, MAX_CONTEXT_CHARS, RECENT_WINDOW
+
+
+# 句子结束符（中文 + 英文 + 换行）
+_SENTENCE_ENDINGS = '。！？；!?;\n'
+
+
+def _truncate_at_sentence(text: str, max_len: int) -> str:
+    """
+    在 max_len 预算内，按完整句子边界截断文本。
+    从 max_len 位置向前找最近的句子结束符；找不到则回退到逗号/空格，
+    再找不到才硬截断并加省略号。
+    """
+    if len(text) <= max_len:
+        return text
+    # 向前搜索句子结束符（从 max_len-1 一直到开头，找到最近的完整句子边界）
+    cut_pos = -1
+    for i in range(max_len - 1, -1, -1):
+        if text[i] in _SENTENCE_ENDINGS:
+            cut_pos = i + 1  # 保留结束符
+            break
+    if cut_pos == -1:
+        # 回退：找逗号/顿号/空格
+        for i in range(max_len - 1, -1, -1):
+            if text[i] in '，,、 ':
+                cut_pos = i + 1
+                break
+    if cut_pos == -1:
+        # 实在找不到边界，硬截断
+        return text[:max_len].rstrip() + '...'
+    return text[:cut_pos].rstrip()
 
 
 # 证据最终不足时追加给生成器的谨慎指令
@@ -36,12 +67,12 @@ class RAGGenerator:
         for i, chunk in enumerate(chunks[:max_chunks]):
             text = chunk['text']
             if total_chars + len(text) > max_chars:
-                # 截断
+                # 按完整句子边界截断，避免把一个 chunk 后半部分的关键事实切掉
                 remaining = max_chars - total_chars
-                if remaining > 100:
-                    text = text[:remaining] + '...'
-                else:
+                # 剩余预算太少（不足 max_chars 的 15% 且 < 30 字）则跳过该 chunk
+                if remaining < min(30, max_chars * 0.15):
                     break
+                text = _truncate_at_sentence(text, remaining)
 
             source = f"[{i+1}]"
             book = chunk.get('book', '')
