@@ -92,11 +92,16 @@ class LLMClient:
             result = self._chat_online(messages, model, temperature, max_tokens, response_format, timeout)
             if result is not None:
                 return result
-            # 线上失败，不降级本地（本地无模型），返回空
-            print(f"[LLM] 线上API全部失败，返回空")
-            return ""
+            # 线上全部失败，标记降级并尝试本地 Ollama
+            print(f"[LLM] 线上API全部失败，降级到本地 Ollama ({OLLAMA_MODEL})")
+            self._local_fallback = True
 
-        return self._chat_local(messages, temperature, max_tokens)
+        # 本地降级路径（use_online=False 时直接走这里）
+        try:
+            return self._chat_local(messages, temperature, max_tokens)
+        except Exception as e:
+            print(f"[LLM] 本地Ollama也失败: {e}")
+            return ""
 
     def _chat_online(self, messages, model, temperature, max_tokens, response_format, timeout) -> Optional[str]:
         """调用线上 OpenAI 兼容 API"""
@@ -149,7 +154,7 @@ class LLMClient:
         return None
 
     def _chat_local(self, messages, temperature, max_tokens) -> str:
-        """调用本地 Ollama"""
+        """调用本地 Ollama（非流式）"""
         url = f"{OLLAMA_BASE_URL}/api/chat"
         payload = {
             "model": OLLAMA_MODEL,
@@ -165,6 +170,42 @@ class LLMClient:
             self.last_model = OLLAMA_MODEL
             return body["message"]["content"]
         raise RuntimeError(f"本地Ollama调用失败: status={status}, body={body}")
+
+    def _chat_local_stream(self, messages, temperature, max_tokens):
+        """调用本地 Ollama（流式），yield 每个 token"""
+        url = f"{OLLAMA_BASE_URL}/api/chat"
+        payload = {
+            "model": OLLAMA_MODEL,
+            "messages": messages,
+            "stream": True,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+            },
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data,
+                                      headers={"Content-Type": "application/json"},
+                                      method="POST")
+        try:
+            resp = urllib.request.urlopen(req, timeout=120)
+            for line in resp:
+                line = line.decode("utf-8").strip()
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                    if chunk.get("done"):
+                        return
+                    content = chunk.get("message", {}).get("content", "")
+                    if content:
+                        yield content
+                except json.JSONDecodeError:
+                    continue
+            self.last_model = OLLAMA_MODEL
+        except Exception as e:
+            print(f"[LLM] 本地Ollama流式失败: {e}")
+            yield ""
 
     def extract_json(self, prompt: str, system_prompt: str = "你是一个信息抽取助手，严格输出JSON格式，不要输出任何其他内容。") -> dict:
         """
@@ -225,8 +266,14 @@ class LLMClient:
         """
         流式聊天补全，生成器，yield每个token。
         一旦开始输出内容，后续出错就不换模型，避免前端拼接重复内容。
+        线上全部失败后自动降级到本地 Ollama 流式。
         """
-        # 尝试每个模型
+        # 已降级或禁用线上 → 直接走本地流式
+        if not self.use_online or self._local_fallback:
+            yield from self._chat_local_stream(messages, temperature, max_tokens)
+            return
+
+        # 尝试每个线上模型
         for attempt in range(len(self.models) * 2):
             use_model = model or self._next_model()
             url = f"{OPENAI_API_BASE}/chat/completions"
@@ -288,7 +335,12 @@ class LLMClient:
                     return
                 time.sleep(1)
                 continue
-        yield ""  # 全部失败
+
+        # 线上全部失败（或已降级），尝试本地 Ollama 流式
+        if self.use_online:
+            print(f"[LLM] 线上API流式全部失败，降级到本地 Ollama ({OLLAMA_MODEL})")
+            self._local_fallback = True
+        yield from self._chat_local_stream(messages, temperature, max_tokens)
 
 
 # 便捷实例
