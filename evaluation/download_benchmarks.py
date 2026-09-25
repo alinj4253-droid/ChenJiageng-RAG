@@ -5,11 +5,11 @@
 
 用法：
     python -m evaluation.download_benchmarks                # 下载全部
-    python -m evaluation.download_benchmarks --dataset crud # 只下载 CRUD-RAG
-    python -m evaluation.download_benchmarks --dataset multihop
+    python -m evaluation.download_benchmarks --dataset crud-rag # 只下载 CRUD-RAG
+    python -m evaluation.download_benchmarks --dataset multihop-rag
 
 下载后可用以下命令在公开数据集上运行消融：
-    python -m evaluation.run_ablation --dataset evaluation/datasets/public/crud_rag.json --benchmark
+    python -m evaluation.run_benchmark --data-dir outputs/benchmarks/multihop-full-100
 """
 import argparse
 import json
@@ -40,7 +40,20 @@ BENCHMARKS = {
         ],
         "output": "multihop_rag.json",
     },
+    "multihop-corpus": {
+        "description": "MultiHop-RAG official retrieval corpus (609 articles)",
+        "urls": ["https://huggingface.co/datasets/yixuantt/MultiHopRAG/resolve/main/corpus.json"],
+        "output": "multihop_corpus.json",
+    },
 }
+
+
+def valid_json_file(path):
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+        return isinstance(value, (dict, list)) and bool(value)
+    except (OSError, ValueError):
+        return False
 
 
 def download_file(url: str, dest: Path, timeout: int = 60) -> bool:
@@ -50,9 +63,13 @@ def download_file(url: str, dest: Path, timeout: int = 60) -> bool:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read()
+        parsed = json.loads(data.decode("utf-8"))
+        if not isinstance(parsed, (dict, list)) or not parsed:
+            raise ValueError("Empty or invalid JSON dataset")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        with open(dest, "wb") as f:
-            f.write(data)
+        temporary = dest.with_suffix(dest.suffix + ".part")
+        temporary.write_bytes(data)
+        temporary.replace(dest)
         print(f"  保存: {dest} ({len(data)} bytes)")
         return True
     except Exception as e:
@@ -73,7 +90,7 @@ def download_benchmark(name: str) -> bool:
     print(f"{'=' * 60}")
 
     dest = PUBLIC_DIR / config["output"]
-    if dest.exists():
+    if valid_json_file(dest):
         print(f"  文件已存在，跳过: {dest}")
         return True
 
@@ -105,9 +122,9 @@ def main():
     parser = argparse.ArgumentParser(description="下载公开 RAG Benchmark 数据集")
     parser.add_argument(
         "--dataset",
-        choices=["all", "crud-rag", "multihop-rag"],
-        default="all",
-        help="指定要下载的数据集（默认全部）",
+        choices=["all", "crud-rag", "multihop-rag", "multihop-corpus"],
+        default="multihop-rag",
+        help="默认下载 MultiHop-RAG 题目与独立 corpus",
     )
     args = parser.parse_args()
 
@@ -115,6 +132,8 @@ def main():
 
     if args.dataset == "all":
         results = {name: download_benchmark(name) for name in BENCHMARKS}
+    elif args.dataset == "multihop-rag":
+        results = {name: download_benchmark(name) for name in ("multihop-rag", "multihop-corpus")}
     else:
         results = {args.dataset: download_benchmark(args.dataset)}
 
@@ -125,8 +144,10 @@ def main():
         print(f"  {name}: {status}")
     print(f"{'=' * 60}")
     print(f"\n数据集目录: {PUBLIC_DIR}")
-    print("\n运行评估示例:")
-    print("  python -m evaluation.run_ablation --dataset evaluation/datasets/public/crud_rag.json --benchmark")
+    if not all(results.values()):
+        raise SystemExit(1)
+    print("\n运行评估示例（先按 datasets/README.md 准备独立语料与索引）:")
+    print("  python -m evaluation.run_benchmark --data-dir outputs/benchmarks/multihop-full-100")
 
 
 if __name__ == "__main__":

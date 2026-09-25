@@ -43,13 +43,13 @@ def extract_from_chunk(chunk: Dict, client=None) -> Optional[Dict]:
         text=chunk['text'][:800],  # 限制输入长度，加快响应
     )
 
-    result = client.extract_json(prompt, system_prompt=KG_EXTRACT_SYSTEM)
+    result = client.extract_json(prompt, system_prompt=KG_EXTRACT_SYSTEM, max_tokens=4096)
 
-    if not result:
+    if not isinstance(result, dict) or not isinstance(result.get('entities'), list) or not isinstance(result.get('relations'), list):
         return None
 
-    entities = result.get('entities', [])
-    relations = result.get('relations', [])
+    entities = result['entities']
+    relations = result['relations']
 
     # 实体名 -> 标准化类型（用于给三元组头尾补类型）
     type_map = {}
@@ -60,7 +60,7 @@ def extract_from_chunk(chunk: Dict, client=None) -> Optional[Dict]:
 
     # 组装三元组：补头/尾类型，去重，过滤无效与自环
     triples = []
-    seen = set()
+    seen = {}
     for r in relations:
         head = r.get('head', '').strip()
         tail = r.get('tail', '').strip()
@@ -70,16 +70,22 @@ def extract_from_chunk(chunk: Dict, client=None) -> Optional[Dict]:
         if len(head) > 30 or len(tail) > 30:
             continue
         key = (head, relation, tail)
+        description = (r.get('description') or '').strip()
         if key in seen:
+            previous = seen[key]
+            if len(description) > len(previous['description']):
+                previous['description'] = description
             continue
-        seen.add(key)
         triples.append({
             'head': head,
             'head_type': type_map.get(head, 'OTHER'),
             'relation': relation,
             'tail': tail,
             'tail_type': type_map.get(tail, 'OTHER'),
+            'description': description,
         })
+
+        seen[key] = triples[-1]
 
     # 保留 LLM 抽取的实体原始信息（name / type / description），
     # 供 kg_normalizer 直接使用，避免从三元组头/尾重建时丢失类型与描述。
@@ -94,8 +100,8 @@ def extract_from_chunk(chunk: Dict, client=None) -> Optional[Dict]:
             'description': (e.get('description', '') or '').strip(),
         })
 
-    if not triples and not entity_records:
-        return None
+    # A valid empty extraction is still a completed chunk (e.g. navigation text).
+    # Persist it so resume does not retry such chunks forever.
 
     return {
         'chunk_id': chunk['chunk_id'],
@@ -200,6 +206,13 @@ def run_extraction(limit: Optional[int] = None, resume: bool = True, max_workers
 
 
 if __name__ == '__main__':
-    import sys
-    limit = int(sys.argv[1]) if len(sys.argv) > 1 else None
-    run_extraction(limit=limit)
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('limit', nargs='?', type=int)
+    parser.add_argument('--workers', type=int, default=5)
+    args = parser.parse_args()
+    if args.workers <= 0 or (args.limit is not None and args.limit <= 0):
+        parser.error('limit and workers must be positive')
+    stats = run_extraction(limit=args.limit, max_workers=args.workers)
+    if stats['failed']:
+        raise SystemExit(1)  # rerun resumes only failed/unprocessed chunks

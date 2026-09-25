@@ -298,6 +298,8 @@ def main():
                         help="启用 LLM-as-Judge（Faithfulness + Answer Correctness）")
     args = parser.parse_args()
 
+    if args.benchmark:
+        parser.error("Use evaluation.run_benchmark --data-dir for isolated full-pipeline public evaluation")
     questions = load_dataset(args.dataset, benchmark=args.benchmark,
                              benchmark_format=args.benchmark_format)
     if args.limit:

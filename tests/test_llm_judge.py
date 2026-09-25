@@ -68,3 +68,16 @@ class TestAnswerCorrectness:
     def test_correctness_missing_score_key_returns_none(self):
         judge = LLMJudge(client=_client({"reason": "no score"}))
         assert judge.answer_correctness("q", "a", "gt") is None
+
+
+def test_correctness_does_not_drop_answer_tail():
+    client = _client({"score": 1})
+    judge = LLMJudge(client=client)
+    judge.answer_correctness("q", "a" * 1000 + "ANSWER_END", "g" * 1000 + "GROUND_TRUTH_END")
+    prompt = client.extract_json.call_args.args[0]
+    assert "ANSWER_END" in prompt and "GROUND_TRUTH_END" in prompt
+
+
+def test_nonfinite_correctness_is_missing():
+    for score in [float("nan"), float("inf"), float("-inf")]:
+        assert LLMJudge(client=_client({"score": score})).answer_correctness("q", "a", "gt") is None

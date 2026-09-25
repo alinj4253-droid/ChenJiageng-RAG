@@ -6,13 +6,13 @@ from pathlib import Path
 
 # ============ 项目路径 ============
 PROJECT_ROOT = Path(__file__).parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR = Path(os.environ.get("RAG_DATA_DIR", PROJECT_ROOT / "data")).resolve()
 CLEAN_DIR = DATA_DIR / "clean"
 RAW_DIR = DATA_DIR / "raw"
 CHUNKS_DIR = DATA_DIR / "chunks"
 KG_DIR = DATA_DIR / "kg"
 VECTOR_DIR = DATA_DIR / "vector_store"
-MODELS_DIR = DATA_DIR / "models"
+MODELS_DIR = PROJECT_ROOT / "data" / "models"
 TEST_DIR = DATA_DIR / "test"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 LOGS_DIR = PROJECT_ROOT / "logs"
@@ -88,8 +88,8 @@ EMBED_DIM = 768
 EMBED_MODEL_PATH = str(MODELS_DIR / "bge-base-zh-v1.5")
 
 # ============ 分词与停用词 ============
-STOPWORDS_FILE = DATA_DIR / "stopwords.txt"
-CUSTOM_DICT_FILE = DATA_DIR / "userdict.txt"
+STOPWORDS_FILE = PROJECT_ROOT / "data" / "stopwords.txt"
+CUSTOM_DICT_FILE = PROJECT_ROOT / "data" / "custom_dict.txt"
 
 # ============ 重排模型 ============
 RERANK_MODEL_NAME = "BAAI/bge-reranker-base"

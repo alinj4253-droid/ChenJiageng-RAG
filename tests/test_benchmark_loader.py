@@ -6,6 +6,7 @@ import json
 import pytest
 
 from evaluation.benchmark_loader import (
+    document_id,
     load_crud_rag,
     load_multihop_rag,
     load_generic_json,
@@ -84,7 +85,7 @@ class TestLoadCrudRag:
             assert "question" in item
             assert "type" in item
             assert "ground_truth" in item
-            assert "relevant_chunks" in item
+            assert "relevant_docs" in item
             assert item["source"] == "CRUD-RAG"
 
     def test_single_doc_type_is_fact(self, crud_rag_file):
@@ -100,7 +101,7 @@ class TestLoadCrudRag:
     def test_relevant_chunks_include_news_ids(self, crud_rag_file):
         result = load_crud_rag(crud_rag_file)
         single = [r for r in result if "1doc" in r["category"]][0]
-        assert "doc_001_news1" in single["relevant_chunks"]
+        assert document_id("新闻内容1") in single["relevant_docs"]
 
 
 class TestLoadMultiHopRag:
@@ -118,8 +119,8 @@ class TestLoadMultiHopRag:
 
     def test_evidence_list_as_relevant_chunks(self, multihop_rag_file):
         result = load_multihop_rag(multihop_rag_file)
-        assert "France Overview" in result[0]["relevant_chunks"]
-        assert "European Capitals" in result[0]["relevant_chunks"]
+        assert document_id("http://x") in result[0]["relevant_docs"]
+        assert document_id("http://y") in result[0]["relevant_docs"]
 
     def test_category_from_question_type(self, multihop_rag_file):
         result = load_multihop_rag(multihop_rag_file)

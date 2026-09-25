@@ -10,6 +10,7 @@ from typing import Optional, List, Dict
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
+from starlette.concurrency import iterate_in_threadpool
 from pydantic import BaseModel
 
 # 确保项目根目录在sys.path中
@@ -144,7 +145,7 @@ async def chat_stream(req: ChatRequest):
         full_answer = ""
         refs = []
         try:
-            for event in pipeline.query_stream(req.message, history=history):
+            async for event in iterate_in_threadpool(pipeline.query_stream(req.message, history=history)):
                 if event["type"] == "token":
                     full_answer += event["content"]
                     running_tasks[session_id]["full_answer"] = full_answer
@@ -175,6 +176,12 @@ async def chat_stream(req: ChatRequest):
             task = running_tasks.get(session_id)
             if not task:
                 break
+            # 只推送新增的增量内容
+            current = task["full_answer"]
+            if len(current) > last_len:
+                delta = current[last_len:]
+                yield f"data: {json.dumps({'type': 'token', 'content': delta}, ensure_ascii=False)}\n\n"
+                last_len = len(current)
             if task["done"]:
                 yield f"data: {json.dumps({'type': 'done', 'references': task['references']}, ensure_ascii=False)}\n\n"
                 yield f"data: {json.dumps({'type': 'saved'}, ensure_ascii=False)}\n\n"
@@ -182,12 +189,6 @@ async def chat_stream(req: ChatRequest):
             if task["status"] == "error":
                 yield f"data: {json.dumps({'type': 'error', 'message': task.get('error', '')}, ensure_ascii=False)}\n\n"
                 break
-            # 只推送新增的增量内容
-            current = task["full_answer"]
-            if len(current) > last_len:
-                delta = current[last_len:]
-                yield f"data: {json.dumps({'type': 'token', 'content': delta}, ensure_ascii=False)}\n\n"
-                last_len = len(current)
             await asyncio.sleep(0.2)
 
     return StreamingResponse(

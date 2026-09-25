@@ -75,7 +75,7 @@ def is_noise_entity(name: str, etype: str) -> bool:
 def build_alias_map(entities: List[Dict]) -> Dict[str, str]:
     """
     构建别名映射：相似实体名归并。
-    策略：1. 手动别名映射 2. 包含关系（短名是长名的子串且长度差<=2）
+    策略：仅使用明确维护的手动别名映射。
     """
     alias_map = {}  # 别名 -> 标准名
 
@@ -84,17 +84,8 @@ def build_alias_map(entities: List[Dict]) -> Dict[str, str]:
         for alias in aliases:
             alias_map[alias] = standard
 
-    # 2. 基于包含关系的自动归并
-    entity_names = list(set(e['name'] for e in entities))
-    entity_names.sort(key=len)  # 短名在前
-
-    for i, short in enumerate(entity_names):
-        if short in alias_map or len(short) < 3:
-            continue
-        for long in entity_names[i+1:]:
-            if short in long and len(long) - len(short) <= 3:
-                alias_map[long] = short
-
+    # 子串相同不能证明同一实体（例如新加坡、新加坡政府、新加坡币）。
+    # 仅使用明确维护的别名，避免跨类型误合并。
     return alias_map
 
 
@@ -149,10 +140,21 @@ def normalize_kg():
     # 收集所有实体和关系（从 triples 中提取）
     all_entities = {}  # name -> entity dict
     all_relations = []
-    entity_chunk_map = defaultdict(set)  # name -> set of chunk_ids
 
     for result in raw_results:
         chunk_id = result.get('chunk_id', '')
+        for e in result.get('entities', []):
+            name = normalize_entity_name(e.get('name', ''))
+            if is_noise_entity(name, ''):
+                continue
+            info = entity_info[name]
+            entity = all_entities.setdefault(name, {
+                'name': name, 'type': info['type'],
+                'description': info['description'], 'source_chunks': set(),
+            })
+            entity['source_chunks'].update(e.get('source_chunks') or [])
+            if chunk_id:
+                entity['source_chunks'].add(chunk_id)
         # 从 triples 中提取实体和关系
         for t in result.get('triples', []):
             head = normalize_entity_name(t['head'])
@@ -160,8 +162,12 @@ def normalize_kg():
             # 类型优先从 entity_info（LLM entities 字段）取，回退到三元组中的 head_type
             head_info = entity_info.get(head, {})
             tail_info = entity_info.get(tail, {})
-            head_type = head_info.get('type') or normalize_entity_type(t.get('head_type', 'OTHER'))
-            tail_type = tail_info.get('type') or normalize_entity_type(t.get('tail_type', 'OTHER'))
+            head_type = head_info.get('type', 'OTHER')
+            if head_type == 'OTHER':
+                head_type = normalize_entity_type(t.get('head_type', 'OTHER'))
+            tail_type = tail_info.get('type', 'OTHER')
+            if tail_type == 'OTHER':
+                tail_type = normalize_entity_type(t.get('tail_type', 'OTHER'))
             head_desc = head_info.get('description', '')
             tail_desc = tail_info.get('description', '')
             relation = t.get('relation', '').strip()
@@ -185,8 +191,10 @@ def normalize_kg():
                     'description': head_desc,
                     'source_chunks': set(),
                 }
-            all_entities[head]['source_chunks'].add(chunk_id)
-            entity_chunk_map[head].add(chunk_id)
+            if all_entities[head]['type'] == 'OTHER':
+                all_entities[head]['type'] = head_type
+            if chunk_id:
+                all_entities[head]['source_chunks'].add(chunk_id)
 
             # 添加tail实体
             if tail not in all_entities:
@@ -196,8 +204,10 @@ def normalize_kg():
                     'description': tail_desc,
                     'source_chunks': set(),
                 }
-            all_entities[tail]['source_chunks'].add(chunk_id)
-            entity_chunk_map[tail].add(chunk_id)
+            if all_entities[tail]['type'] == 'OTHER':
+                all_entities[tail]['type'] = tail_type
+            if chunk_id:
+                all_entities[tail]['source_chunks'].add(chunk_id)
 
             # 添加关系（保留关系描述）
             all_relations.append({
@@ -216,7 +226,11 @@ def normalize_kg():
 
     # 应用别名映射
     def resolve_name(name):
-        return alias_map.get(name, name)
+        seen = set()
+        while name in alias_map and name not in seen:
+            seen.add(name)
+            name = alias_map[name]
+        return name
 
     # 归并实体
     merged_entities = {}
@@ -265,24 +279,19 @@ def normalize_kg():
                 merged_relations[key]['description'] = r['description']
         merged_relations[key]['source_chunks'].add(r['source_chunk'])
 
-    # 过滤：只保留至少出现在一个关系中的实体（或者出现次数>=2的实体）
-    relation_entities = set()
-    for r in merged_relations.values():
-        relation_entities.add(r['head'])
-        relation_entities.add(r['tail'])
-
+    # 保留具有来源的有效实体，包括未参与关系的独立实体。
     final_entities = {}
     for name, entity in merged_entities.items():
-        if name in relation_entities or len(entity['source_chunks']) >= 2:
-            entity['aliases'] = list(entity['aliases'])
-            entity['source_chunks'] = list(entity['source_chunks'])
+        if entity['source_chunks']:
+            entity['aliases'] = sorted(entity['aliases'])
+            entity['source_chunks'] = sorted(entity['source_chunks'])
             entity['chunk_count'] = len(entity['source_chunks'])
             final_entities[name] = entity
 
     final_relations = []
     for r in merged_relations.values():
         if r['head'] in final_entities and r['tail'] in final_entities:
-            r['source_chunks'] = list(r['source_chunks'])
+            r['source_chunks'] = sorted(r['source_chunks'])
             r['chunk_count'] = len(r['source_chunks'])
             final_relations.append(r)
 

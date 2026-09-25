@@ -86,3 +86,28 @@ class TestChatStreamSemantics:
         # 会话持久化：创建会话 + 写入用户消息
         fake_db.create_session.assert_called_once()
         fake_db.add_message.assert_any_call("sess_1", "user", "接着说")
+
+
+def test_stream_sends_final_tokens_before_done(wired):
+    import json
+    client, _, _ = wired
+    response = client.post("/api/chat/stream", json={"message": "接着说"})
+    events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+    assert "".join(e["content"] for e in events if e["type"] == "token") == "接着说的答案"
+    assert next(i for i,e in enumerate(events) if e["type"] == "token") < next(i for i,e in enumerate(events) if e["type"] == "done")
+
+
+def test_stream_iteration_does_not_block_event_loop(wired):
+    import threading
+    client, _, pipeline = wired
+    worker_threads = []
+    def stream(*args, **kwargs):
+        worker_threads.append(threading.get_ident())
+        yield {"type": "token", "content": "ok"}
+        yield {"type": "done", "references": []}
+    pipeline.query_stream.side_effect = stream
+    with client:
+        loop_thread = client.portal.call(threading.get_ident)
+        response = client.post("/api/chat/stream", json={"message": "q"})
+    assert response.status_code == 200
+    assert worker_threads and worker_threads[0] != loop_thread

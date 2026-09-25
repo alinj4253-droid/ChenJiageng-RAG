@@ -16,6 +16,7 @@ LLM-as-Judge 评估指标
   - 所有评判 prompt 明确要求只依据给定材料，不引入外部知识。
 """
 import json
+import math
 from typing import List, Dict, Optional
 
 from src.llm_client import get_client
@@ -103,6 +104,8 @@ class LLMJudge:
             return None
         try:
             score = float(score)
+            if not math.isfinite(score):
+                return None
             score = max(0.0, min(1.0, score))
         except (ValueError, TypeError):
             return None
@@ -120,8 +123,8 @@ class LLMJudge:
             return None
         prompt = CORRECTNESS_USER.format(
             question=question,
-            ground_truth=ground_truth[:1000],
-            answer=answer[:1000],
+            ground_truth=ground_truth,
+            answer=answer,
         )
         result = self.client.extract_json(prompt, system_prompt=CORRECTNESS_SYSTEM)
         if not result:
@@ -131,6 +134,8 @@ class LLMJudge:
             return None
         try:
             score = float(score)
+            if not math.isfinite(score):
+                return None
             score = max(0.0, min(1.0, score))
         except (ValueError, TypeError):
             return None

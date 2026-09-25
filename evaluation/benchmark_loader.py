@@ -17,14 +17,20 @@
     }
 
 支持的公开数据集：
-  - CRUD-RAG: https://github.com/OSU-NLP-Group/CRUD-RAG
+  - CRUD-RAG: https://github.com/IAAR-Shanghai/CRUD_RAG
     格式：JSON，含 question / answer / relevant document IDs
   - MultiHop-RAG: https://github.com/yixuantt/MultiHop-RAG
     格式：JSON/JSONL，含 query / answer / supporting_facts
 """
 import json
+import hashlib
 from pathlib import Path
 from typing import List, Dict
+
+
+def document_id(text: str) -> str:
+    """Stable source document ID shared by QA labels and indexed corpus."""
+    return "doc_" + hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:24]
 
 
 def _ensure_id(item: Dict, idx: int) -> str:
@@ -69,21 +75,28 @@ def load_crud_rag(path: Path) -> List[Dict]:
         for item in items:
             questions = item.get("questions") or []
             answers = item.get("answers") or []
+            if isinstance(questions, str):
+                questions = [questions]
+            if isinstance(answers, str):
+                answers = [answers]
+            if len(questions) != len(answers):
+                raise ValueError(f"Question/answer count mismatch: {task_key}")
             doc_id = item.get("ID", "")
             # 源文档作为相关 chunk（用 ID 标识）
-            relevant = [f"{doc_id}_news{i+1}" for i in range(doc_count)]
+            relevant = [document_id(item[f"news{i+1}"]) for i in range(doc_count)
+                        if item.get(f"news{i+1}")]
 
             for q_idx, question in enumerate(questions):
                 if not question or not isinstance(question, str):
                     continue
                 answer = answers[q_idx] if q_idx < len(answers) else ""
                 converted.append({
-                    "id": f"{doc_id}_q{q_idx}",
+                    "id": f"{task_key}_{doc_id}_q{q_idx}",
                     "question": question,
                     "type": "multihop" if doc_count > 1 else "fact",
                     "answer_keywords": [],
                     "ground_truth": answer if isinstance(answer, str) else str(answer),
-                    "relevant_chunks": relevant,
+                    "relevant_docs": relevant,
                     "category": f"CRUD-QA-{doc_count}doc",
                     "source": "CRUD-RAG",
                 })
@@ -133,19 +146,30 @@ def load_multihop_rag(path: Path) -> List[Dict]:
         if isinstance(evidence, list):
             for ev in evidence:
                 if isinstance(ev, dict):
-                    title = ev.get("title") or ev.get("doc_title") or ""
+                    title = ev.get("url") or ev.get("title") or ev.get("doc_title") or ""
                     if title:
-                        relevant.append(title)
+                        relevant.append(document_id(title))
                 elif isinstance(ev, str):
-                    relevant.append(ev)
+                    relevant.append(document_id(ev))
 
+        supporting_evidence = []
+        for ev in evidence:
+            if isinstance(ev, dict) and ev.get("fact"):
+                source_id = ev.get("url") or ev.get("title") or ""
+                supporting_evidence.append({
+                    "evidence_id": document_id(source_id + "\n" + ev["fact"]),
+                    "source_id": source_id,
+                    "document_id": document_id(source_id),
+                    "fact": ev["fact"],
+                })
         converted.append({
             "id": _ensure_id(item, idx),
             "question": question,
+            "supporting_evidence": supporting_evidence,
             "type": "multihop",
             "answer_keywords": [],
             "ground_truth": answer,
-            "relevant_chunks": relevant,
+            "relevant_docs": relevant,
             "category": qtype,
             "source": "MultiHop-RAG",
         })

@@ -50,9 +50,10 @@ class TestExtractToTriples:
         assert result["entities"][0]["type"] == "PERSON"
         assert result["entities"][0]["description"] == "华侨领袖"
         t = result["triples"][0]
-        assert set(t.keys()) == {"head", "head_type", "relation", "tail", "tail_type"}
+        assert set(t.keys()) == {"head", "head_type", "relation", "tail", "tail_type", "description"}
         assert t["head"] == "陈嘉庚" and t["head_type"] == "PERSON"
         assert t["relation"] == "创办"
+        assert t["description"] == "1921年"
         assert t["tail"] == "厦门大学" and t["tail_type"] == "ORG"
 
     def test_unknown_entity_type_defaults_other(self):
@@ -168,3 +169,14 @@ class TestTopLevelFields:
         del client.last_model  # 让 getattr 走默认
         result = extract_from_chunk(_chunk(), client)
         assert result["model"] == ""
+
+
+def test_valid_empty_extraction_can_be_resumed():
+    result = extract_from_chunk(_chunk(), _client({"entities": [], "relations": []}))
+    assert result["chunk_id"] == "book_ch000_000"
+    assert result["entities"] == [] and result["triples"] == []
+
+
+def test_unrelated_json_is_not_a_completed_extraction():
+    for invalid in [{"error": "failed"}, {"entities": None, "relations": []}, ["unexpected"]]:
+        assert extract_from_chunk(_chunk(), _client(invalid)) is None

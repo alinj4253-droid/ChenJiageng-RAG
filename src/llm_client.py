@@ -207,7 +207,8 @@ class LLMClient:
             print(f"[LLM] 本地Ollama流式失败: {e}")
             yield ""
 
-    def extract_json(self, prompt: str, system_prompt: str = "你是一个信息抽取助手，严格输出JSON格式，不要输出任何其他内容。") -> dict:
+    def extract_json(self, prompt: str, system_prompt: str = "你是一个信息抽取助手，严格输出JSON格式，不要输出任何其他内容。",
+                     max_tokens: int = 1024) -> dict:
         """
         从文本中抽取结构化JSON。自动处理JSON解析。
 
@@ -225,7 +226,7 @@ class LLMClient:
         content = self.chat(
             messages,
             temperature=0.1,
-            max_tokens=1024,
+            max_tokens=max_tokens,
             timeout=120,
         )
         return self._parse_json(content)
