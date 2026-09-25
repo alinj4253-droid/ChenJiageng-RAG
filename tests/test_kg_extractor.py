@@ -43,7 +43,12 @@ class TestExtractToTriples:
 
         assert result is not None
         assert "triples" in result
-        assert "entities" not in result and "relations" not in result
+        # entities 字段现在被保留（含 name/type/description），供 kg_normalizer 使用
+        assert "entities" in result
+        assert len(result["entities"]) == 2
+        assert result["entities"][0]["name"] == "陈嘉庚"
+        assert result["entities"][0]["type"] == "PERSON"
+        assert result["entities"][0]["description"] == "华侨领袖"
         t = result["triples"][0]
         assert set(t.keys()) == {"head", "head_type", "relation", "tail", "tail_type"}
         assert t["head"] == "陈嘉庚" and t["head_type"] == "PERSON"
@@ -74,11 +79,15 @@ class TestExtractToTriples:
         assert len(result["triples"]) == 1
 
     def test_self_loop_filtered(self):
+        """自环关系被过滤，但 entities 仍保留（供 normalizer 富集）"""
         raw = _llm_raw(
             entities=[{"name": "陈嘉庚", "type": "PERSON"}],
             relations=[{"head": "陈嘉庚", "relation": "自称", "tail": "陈嘉庚"}],
         )
-        assert extract_from_chunk(_chunk(), _client(raw)) is None
+        result = extract_from_chunk(_chunk(), _client(raw))
+        assert result is not None
+        assert result["triples"] == []  # 自环被过滤
+        assert len(result["entities"]) == 1  # 实体仍保留
 
     def test_missing_parts_filtered(self):
         raw = _llm_raw(
@@ -95,6 +104,7 @@ class TestExtractToTriples:
         assert len(result["triples"]) == 1
 
     def test_overlong_entity_name_filtered(self):
+        """超长实体名的关系被过滤，但正常 entities 仍保留"""
         long_name = "超长实体名称" * 6  # 36 字，明确 > 30
         raw = _llm_raw(
             entities=[{"name": "陈嘉庚", "type": "PERSON"}],
@@ -102,11 +112,18 @@ class TestExtractToTriples:
                         "tail": long_name}],
         )
         result = extract_from_chunk(_chunk(), _client(raw))
-        assert result is None
+        assert result is not None
+        assert result["triples"] == []  # 超长实体关系被过滤
+        assert len(result["entities"]) == 1  # 正常实体保留
 
-    def test_empty_relations_returns_none(self):
-        raw = _llm_raw(entities=[{"name": "陈嘉庚", "type": "PERSON"}], relations=[])
-        assert extract_from_chunk(_chunk(), _client(raw)) is None
+    def test_entities_only_still_returned(self):
+        """只有 entities 没有 triples 时，仍返回结果（entities 供 normalizer 富集类型/描述）"""
+        raw = _llm_raw(entities=[{"name": "陈嘉庚", "type": "PERSON", "description": "华侨领袖"}], relations=[])
+        result = extract_from_chunk(_chunk(), _client(raw))
+        assert result is not None
+        assert result["triples"] == []
+        assert len(result["entities"]) == 1
+        assert result["entities"][0]["description"] == "华侨领袖"
 
     def test_llm_empty_response_returns_none(self):
         assert extract_from_chunk(_chunk(), _client({})) is None

@@ -116,6 +116,36 @@ def normalize_kg():
 
     print(f'读取 {len(raw_results)} 个chunk的抽取结果')
 
+    # ---- 从 LLM 原始 entities 字段收集实体信息（type / description）----
+    # 这是实体类型与描述的权威来源；三元组中 head_type/tail_type 仅作回退。
+    entity_info: Dict[str, Dict] = {}  # normalized_name -> {type, description}
+
+    def _register_entity_info(name: str, etype: str, desc: str):
+        """合并同一实体在不同 chunk 中的信息：优先非 OTHER 类型、保留最长描述"""
+        std = normalize_entity_name(name)
+        if not std:
+            return
+        etype = normalize_entity_type(etype) if etype else 'OTHER'
+        desc = (desc or '').strip()
+        if std not in entity_info:
+            entity_info[std] = {'type': etype, 'description': desc}
+        else:
+            existing = entity_info[std]
+            # 类型升级：OTHER -> 任意具体类型
+            if existing['type'] == 'OTHER' and etype != 'OTHER':
+                existing['type'] = etype
+            # 描述：保留更长的
+            if len(desc) > len(existing['description']):
+                existing['description'] = desc
+
+    for result in raw_results:
+        for e in result.get('entities', []):
+            _register_entity_info(
+                e.get('name', ''),
+                e.get('type', 'OTHER'),
+                e.get('description', ''),
+            )
+
     # 收集所有实体和关系（从 triples 中提取）
     all_entities = {}  # name -> entity dict
     all_relations = []
@@ -127,9 +157,15 @@ def normalize_kg():
         for t in result.get('triples', []):
             head = normalize_entity_name(t['head'])
             tail = normalize_entity_name(t['tail'])
-            head_type = normalize_entity_type(t.get('head_type', 'OTHER'))
-            tail_type = normalize_entity_type(t.get('tail_type', 'OTHER'))
+            # 类型优先从 entity_info（LLM entities 字段）取，回退到三元组中的 head_type
+            head_info = entity_info.get(head, {})
+            tail_info = entity_info.get(tail, {})
+            head_type = head_info.get('type') or normalize_entity_type(t.get('head_type', 'OTHER'))
+            tail_type = tail_info.get('type') or normalize_entity_type(t.get('tail_type', 'OTHER'))
+            head_desc = head_info.get('description', '')
+            tail_desc = tail_info.get('description', '')
             relation = t.get('relation', '').strip()
+            rel_description = (t.get('description', '') or '').strip()
             if not relation:
                 continue
 
@@ -146,7 +182,7 @@ def normalize_kg():
                 all_entities[head] = {
                     'name': head,
                     'type': head_type,
-                    'description': '',
+                    'description': head_desc,
                     'source_chunks': set(),
                 }
             all_entities[head]['source_chunks'].add(chunk_id)
@@ -157,18 +193,18 @@ def normalize_kg():
                 all_entities[tail] = {
                     'name': tail,
                     'type': tail_type,
-                    'description': '',
+                    'description': tail_desc,
                     'source_chunks': set(),
                 }
             all_entities[tail]['source_chunks'].add(chunk_id)
             entity_chunk_map[tail].add(chunk_id)
 
-            # 添加关系
+            # 添加关系（保留关系描述）
             all_relations.append({
                 'head': head,
                 'relation': relation,
                 'tail': tail,
-                'description': '',
+                'description': rel_description,
                 'source_chunk': chunk_id,
             })
 
@@ -195,10 +231,13 @@ def normalize_kg():
                 'source_chunks': set(entity['source_chunks']),
             }
         else:
-            # 合并
-            if len(entity['description']) > len(merged_entities[standard]['description']):
-                merged_entities[standard]['description'] = entity['description']
-            merged_entities[standard]['source_chunks'].update(entity['source_chunks'])
+            # 合并：类型升级（OTHER → 具体类型）、保留最长描述、聚合 source_chunks
+            existing = merged_entities[standard]
+            if existing['type'] == 'OTHER' and entity['type'] != 'OTHER':
+                existing['type'] = entity['type']
+            if len(entity['description']) > len(existing['description']):
+                existing['description'] = entity['description']
+            existing['source_chunks'].update(entity['source_chunks'])
         # 无论新建还是已存在，只要原名与标准名不同就记录为别名
         # （修复：标准实体首次由别名创建时，别名此前会丢失）
         if name != standard:
@@ -220,6 +259,10 @@ def normalize_kg():
                 'description': r['description'],
                 'source_chunks': set(),
             }
+        else:
+            # 保留最长的关系描述
+            if len(r['description']) > len(merged_relations[key]['description']):
+                merged_relations[key]['description'] = r['description']
         merged_relations[key]['source_chunks'].add(r['source_chunk'])
 
     # 过滤：只保留至少出现在一个关系中的实体（或者出现次数>=2的实体）
@@ -258,13 +301,19 @@ def normalize_kg():
 
     # 统计
     type_counts = defaultdict(int)
+    entities_with_desc = 0
     for e in final_entities.values():
         type_counts[e['type']] += 1
+        if e.get('description'):
+            entities_with_desc += 1
 
     stats = {
         'total_entities': len(final_entities),
         'total_relations': len(final_relations),
         'entity_types': dict(type_counts),
+        'entities_with_description': entities_with_desc,
+        'description_coverage': round(entities_with_desc / len(final_entities), 4) if final_entities else 0,
+        'other_type_count': type_counts.get('OTHER', 0),
         'alias_count': len(alias_map),
         'raw_chunks': len(raw_results),
     }

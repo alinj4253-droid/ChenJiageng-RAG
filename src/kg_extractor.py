@@ -81,13 +81,27 @@ def extract_from_chunk(chunk: Dict, client=None) -> Optional[Dict]:
             'tail_type': type_map.get(tail, 'OTHER'),
         })
 
-    if not triples:
+    # 保留 LLM 抽取的实体原始信息（name / type / description），
+    # 供 kg_normalizer 直接使用，避免从三元组头/尾重建时丢失类型与描述。
+    entity_records = []
+    for e in entities:
+        name = e.get('name', '').strip()
+        if not name or len(name) > 30:
+            continue
+        entity_records.append({
+            'name': name,
+            'type': e.get('type', 'OTHER').strip().upper(),
+            'description': (e.get('description', '') or '').strip(),
+        })
+
+    if not triples and not entity_records:
         return None
 
     return {
         'chunk_id': chunk['chunk_id'],
         'source_file': chunk.get('book', ''),
         'chapter': chunk.get('chapter', ''),
+        'entities': entity_records,
         'triples': triples,
         'model': getattr(client, 'last_model', '') or '',
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),

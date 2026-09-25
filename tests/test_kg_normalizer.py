@@ -15,9 +15,10 @@ def _triple(head, relation, tail, head_type="OTHER", tail_type="OTHER"):
             "tail": tail, "tail_type": tail_type}
 
 
-def _row(chunk_id, triples, model="qwen2.5:32b"):
+def _row(chunk_id, triples, entities=None, model="qwen2.5:32b"):
     return {"chunk_id": chunk_id, "source_file": "书", "chapter": "章",
-            "triples": triples, "model": model, "timestamp": "2026-09-18 00:00:00"}
+            "entities": entities or [], "triples": triples,
+            "model": model, "timestamp": "2026-09-18 00:00:00"}
 
 
 def _write_raw(tmp_path, rows):
@@ -124,3 +125,77 @@ class TestNormalizePipeline:
     def test_missing_raw_file_returns_none(self, tmp_path, monkeypatch):
         monkeypatch.setattr(N, "KG_DIR", tmp_path)
         assert N.normalize_kg() is None
+
+
+class TestEntityInfoPreservation:
+    """验证从 LLM entities 字段保留 type / description（修复归一化丢失问题）"""
+
+    def test_entity_description_preserved(self, tmp_path, monkeypatch):
+        """entities 字段中的 description 应保留到最终 entities.jsonl"""
+        monkeypatch.setattr(N, "KG_DIR", tmp_path)
+        _write_raw(tmp_path, [
+            _row("c1",
+                 triples=[_triple("陈嘉庚", "创办", "厦门大学", "PERSON", "ORG")],
+                 entities=[
+                     {"name": "陈嘉庚", "type": "PERSON", "description": "著名华侨领袖，创办厦门大学"},
+                     {"name": "厦门大学", "type": "ORG", "description": "1921年由陈嘉庚创办的大学"},
+                 ]),
+        ])
+        N.normalize_kg()
+        entities = {e["name"]: e for e in _read_jsonl(tmp_path / "entities.jsonl")}
+        assert entities["陈嘉庚"]["description"] == "著名华侨领袖，创办厦门大学"
+        assert entities["厦门大学"]["description"] == "1921年由陈嘉庚创办的大学"
+
+    def test_entity_type_from_entities_preferred(self, tmp_path, monkeypatch):
+        """entities 字段的 type 优先于 triples 中的 head_type/tail_type"""
+        monkeypatch.setattr(N, "KG_DIR", tmp_path)
+        _write_raw(tmp_path, [
+            _row("c1",
+                 # triples 中类型给错为 OTHER
+                 triples=[_triple("陈嘉庚", "创办", "厦门大学", "OTHER", "OTHER")],
+                 # entities 中给出正确类型
+                 entities=[
+                     {"name": "陈嘉庚", "type": "PERSON", "description": ""},
+                     {"name": "厦门大学", "type": "ORG", "description": ""},
+                 ]),
+        ])
+        N.normalize_kg()
+        entities = {e["name"]: e for e in _read_jsonl(tmp_path / "entities.jsonl")}
+        assert entities["陈嘉庚"]["type"] == "PERSON"
+        assert entities["厦门大学"]["type"] == "ORG"
+
+    def test_type_upgrade_on_alias_merge(self, tmp_path, monkeypatch):
+        """别名归并时，OTHER 类型应被具体类型升级"""
+        monkeypatch.setattr(N, "KG_DIR", tmp_path)
+        _write_raw(tmp_path, [
+            _row("c1",
+                 triples=[_triple("嘉庚", "创办", "厦门大学", "OTHER", "ORG")],
+                 entities=[{"name": "嘉庚", "type": "OTHER", "description": ""}]),
+            _row("c2",
+                 triples=[_triple("陈嘉庚", "主持", "南侨总会", "PERSON", "ORG")],
+                 entities=[{"name": "陈嘉庚", "type": "PERSON", "description": "华侨领袖"}]),
+        ])
+        N.normalize_kg()
+        entities = {e["name"]: e for e in _read_jsonl(tmp_path / "entities.jsonl")}
+        # 嘉庚 归并到 陈嘉庚，类型应升级为 PERSON
+        assert "陈嘉庚" in entities
+        assert entities["陈嘉庚"]["type"] == "PERSON"
+        assert entities["陈嘉庚"]["description"] == "华侨领袖"
+
+    def test_description_coverage_in_stats(self, tmp_path, monkeypatch):
+        """统计信息应包含 description_coverage 和 other_type_count"""
+        monkeypatch.setattr(N, "KG_DIR", tmp_path)
+        _write_raw(tmp_path, [
+            _row("c1",
+                 triples=[_triple("陈嘉庚", "创办", "厦门大学", "PERSON", "ORG")],
+                 entities=[
+                     {"name": "陈嘉庚", "type": "PERSON", "description": "华侨领袖"},
+                     {"name": "厦门大学", "type": "ORG", "description": ""},
+                 ]),
+        ])
+        stats = N.normalize_kg()
+        assert "entities_with_description" in stats
+        assert "description_coverage" in stats
+        assert "other_type_count" in stats
+        assert stats["entities_with_description"] == 1
+        assert stats["description_coverage"] == 0.5
