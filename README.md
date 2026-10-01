@@ -21,7 +21,8 @@ Cross-Encoder 精排与三个轻量 Agentic 决策点，提供**有引用、可�
 核心链路：
 
 ```
-Query Analysis
+Pre-Retrieval Rewrite（补齐代词/缺失语境，失败回退原问题；Judge 与 Generator 始终围绕原始问题）
+  → Query Analysis（基于改写后 query）
   → Retrieval Routing（Agentic 决策点 1：按 query_mode 选择检索器组合）
   → Dense / BM25 / Graph（实体 + 关系）检索
   → Weighted RRF 融合
@@ -37,7 +38,8 @@ Query Analysis
 
 | 能力 | 技术实现 |
 |---|---|
-| **Retrieval Router** | 规则 + LLM 把问题分为 `naive / local / global / hybrid` 四类，输出显式 `RetrievalPlan` 决定启用哪些检索器与是否精排/裁判；**所有非空 Query 都先经 QueryAnalyzer**，不再用“问题长度”做 naive 启发式（长度与难度无可靠对应） |
+| **Pre-Retrieval Rewrite** | 检索前用 LLM 对用户原问题做轻量级改写（补全代词/缺失语境、规范口语化表达），仅带入最近 4 轮历史；**无 history 仍改写、坏 history 不崩溃、改写失败安全回退原问题**；改写后 query 仅进入分析与检索，**Evidence Judge 与 Generator 始终围绕用户原始问题**，避免答非所问 |
+| **Retrieval Router** | 规则 + LLM 把问题分为 `naive / local / global / hybrid` 四类，输出显式 `RetrievalPlan` 决定启用哪些检索器与是否精排/裁判；**所有非空 Query 都先经 QueryAnalyzer**，不再用”问题长度”做 naive 启发式（长度与难度无可靠对应） |
 | **多路混合检索** | BGE 向量语义检索（FAISS）+ BM25 关键词检索（jieba 分词）+ 知识图谱实体检索，按 Plan 动态组合 |
 | **图谱实体检索** | 实体精确/别名匹配 + 向量匹配，**双向邻接表**两跳权重衰减 BFS 子图扩展（边带 `outgoing/incoming` 方向，不丢失关系语义） |
 | **图谱关系检索** | 对 `global / hybrid` 问题，用 high-level 关键词检索 **relation 向量索引**（FAISS），经三元组 `source_chunks` 召回关系语义证据 |
@@ -58,6 +60,12 @@ Query Analysis
 ```
                           用户提问
                             │
+                            ▼
+                  ┌───────────────────┐
+                  │ Pre-Retrieval     │  补齐代词/语境，失败回退
+                  │ Rewrite           │  Judge/Generator 仍用原问题
+                  └───────────────────┘
+                            │（改写后 query）
                             ▼
                   ┌───────────────────┐
                   │  Query Analysis   │  所有 Query 经 LLM 判定 query_mode
@@ -148,7 +156,7 @@ Query Analysis
 | **对话存储** | SQLite + SQLAlchemy ORM |
 | **前端** | 原生 HTML / JavaScript + vis-network + marked.js + DOMPurify |
 | **流式传输** | SSE（Server-Sent Events） |
-| **测试 / 评估** | pytest（全部 mock，不依赖真实模型/API） |
+| **测试** | pytest（全部 mock，不依赖真实模型/API/Key） |
 
 ---
 
@@ -163,7 +171,7 @@ ChenJiageng-RAG/
 │   ├── query_analyzer.py       # 查询分析（关键词 + query_mode）
 │   ├── retrieval_router.py     # 【Agentic ①】检索路由：RetrievalPlan + 规则选路
 │   ├── evidence_judge.py       # 【Agentic ②】证据充分性裁判
-│   ├── query_rewriter.py       # 【Agentic ③】证据不足时的查询改写
+│   ├── query_rewriter.py       # 【检索前改写】PreRetrievalRewriter + 【Agentic ③】证据不足时的 QueryRewriter
 │   ├── memory_manager.py       # 增量滚动摘要（RollingSummaryManager）
 │   ├── trace_logger.py         # 结构化执行 trace（JSONL）
 │   ├── hybrid_retriever.py     # 向量 + BM25 混合检索
@@ -174,9 +182,10 @@ ChenJiageng-RAG/
 │   ├── rag_generator.py        # 答案生成（同步 + 流式，支持谨慎作答）
 │   ├── llm_client.py           # LLM 客户端（DeepSeek / Ollama 降级）
 │   ├── chunker.py              # 文档语义分块
-│   ├── kg_extractor.py         # 知识图谱三元组抽取
+│   ├── kg_extractor.py         # 知识图谱三元组抽取（支持连续失败熔断）
 │   ├── kg_normalizer.py        # 实体归一化消歧
 │   ├── kg_indexer.py           # 图谱实体/关系向量索引
+│   ├── milvus_migrator.py      # FAISS → Milvus 迁移工具
 │   ├── neo4j_importer.py       # 三元组批量导入 Neo4j
 │   ├── db.py                   # 会话与消息存储（SQLAlchemy）
 │   ├── prompts.py              # 各类 Prompt 模板
@@ -302,9 +311,9 @@ push / Pull Request 到 `main` 时，GitHub Actions 会自动在 ubuntu-latest �
 `pytest -q`（见顶部绿色 tests badge 与 `.github/workflows/tests.yml`）。需要真实环境的
 集成测试请标记 `@pytest.mark.integration`，默认 CI 不运行。
 
-覆盖：查询分析、检索路由、证据裁判、查询改写、有限重试循环（含死循环防护）、
+覆盖：检索前改写（无 history 仍改写、坏 history 安全处理、Judge/Generator 保留 original query）、查询分析、检索路由、证据裁判、查询改写、有限重试循环（含死循环防护）、
 真实 retrieval_calls 统计、混合检索融合、图谱双向遍历与关系检索、
-增量滚动摘要、会话存储、单轮/流式聊天接口职责、trace 落盘等。
+增量滚动摘要、会话存储、单轮/流式聊天接口职责、trace 落盘、LLM 在线/本地降级（干净环境无 API Key 亦可通过）等。
 
 ---
 
@@ -329,6 +338,10 @@ push / Pull Request 到 `main` 时，GitHub Actions 会自动在 ubuntu-latest �
   有限重试三处让 LLM 做决策，其余步骤固定可控。重试有严格上界（默认 1 次），
   且裁判始终针对**原始问题**、重试只替换检索 query（保留原分析与 Plan），
   改写结果重复即停，从机制上杜绝无限循环与成本失控。
+- **Pre-Retrieval Rewrite 与原始问题隔离**：检索前对用户口语化/指代不清的问题做一次
+  轻量改写（补全代词、规范表达），改写后 query 仅送入 QueryAnalyzer 与 Retriever；
+  Evidence Judge 与 Generator 始终接收用户**原始问题**，避免"改写后问题"漂移导致
+  答非所问。改写器对空 history、损坏 history、LLM 异常/空输出均安全回退原问题。
 - **RetrievalPlan 显式化**：路由输出一个 frozen 的 `RetrievalPlan`（各检索器/精排/
   裁判开关），检索、融合、裁判都只依赖该 Plan，
   无需改业务代码。
