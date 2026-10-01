@@ -37,23 +37,26 @@ class PreRetrievalRewriter:
         根据历史上下文对原查询进行轻量级改写。
         如果改写失败，必须安全返回原查询 (fallback to original)。
         """
-        # 没有历史或者全是空白，退化为不需要改写
-        if not history:
-            return query.strip()
-
-        history_text = "\n".join(
-            f"{'用户' if msg['role'] == 'user' else '助手'}: {msg['content']}"
-            for msg in history[-4:]  # 仅带入最近几轮
-        )
-        if not history_text.strip():
-            return query.strip()
-
-        prompt = PRE_RETRIEVAL_REWRITE_USER.format(
-            history=history_text,
-            query=query,
-        )
-
         try:
+            history_text = "（无历史对话）"
+            if history:
+                # 处理 history 可能是异常格式的情况，增加鲁棒性
+                try:
+                    lines = []
+                    for msg in history[-4:]:  # 仅带入最近几轮
+                        if isinstance(msg, dict) and "content" in msg:
+                            role = "用户" if msg.get("role") == "user" else "助手"
+                            lines.append(f"{role}: {msg['content']}")
+                    if lines:
+                        history_text = "\n".join(lines)
+                except Exception as e:
+                    logger.warning(f"解析 history 时发生异常，按无历史处理: {e}")
+
+            prompt = PRE_RETRIEVAL_REWRITE_USER.format(
+                history=history_text,
+                query=query,
+            )
+
             result = self.client.extract_json(
                 prompt, system_prompt=PRE_RETRIEVAL_REWRITE_SYSTEM, max_tokens=512
             )

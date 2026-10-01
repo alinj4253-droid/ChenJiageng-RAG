@@ -47,16 +47,28 @@ def test_pre_rewrite_uses_history():
     assert "用户: 陈嘉庚" in call_args
 
 
-def test_pre_rewrite_no_history_bypassed():
-    """验证没有 history 或 history 为空时直接绕过改写"""
+def test_pre_rewrite_no_history_still_rewrites():
+    """验证没有 history 或 history 为空时也应该调用改写（为了提升口语化/不完整句子）"""
     mock_client = MagicMock()
+    mock_client.extract_json.return_value = {"rewritten": "陈嘉庚创办了哪些学校？", "reason": "规范表达"}
     rewriter = PreRetrievalRewriter(client=mock_client)
-    
-    assert rewriter.rewrite("这是谁") == "这是谁"
-    assert rewriter.rewrite("这是谁", history=[]) == "这是谁"
-    
-    # 验证完全没调用大模型
-    mock_client.extract_json.assert_not_called()
+
+    assert rewriter.rewrite("创办了哪些学校") == "陈嘉庚创办了哪些学校？"
+    assert rewriter.rewrite("创办了哪些学校", history=[]) == "陈嘉庚创办了哪些学校？"
+
+    # 验证确实调用了大模型
+    assert mock_client.extract_json.call_count == 2
+
+def test_pre_rewrite_bad_history_fallback():
+    """验证 history 格式损坏时不会崩溃，仍能继续执行改写或回退"""
+    mock_client = MagicMock()
+    mock_client.extract_json.return_value = {"rewritten": "安全通过"}
+    rewriter = PreRetrievalRewriter(client=mock_client)
+
+    bad_history = [{"wrong_key": "user"}] # 缺失 content 和 role
+    rewritten = rewriter.rewrite("测一下", history=bad_history)
+
+    assert rewritten == "安全通过"
 
 
 def test_pipeline_preserves_original_query(monkeypatch):
