@@ -75,6 +75,10 @@ def _make_pipeline(use_graph=True, use_rerank=True, enable_routing=True,
     pipeline.query_rewriter = MagicMock()
     pipeline.query_rewriter.rewrite.return_value = None
 
+    # 注入 PreRetrievalRewriter 避免 AttributeError
+    pipeline.pre_retrieval_rewriter = MagicMock()
+    pipeline.pre_retrieval_rewriter.rewrite.side_effect = lambda q, h=None: q
+
     return pipeline
 
 
@@ -83,7 +87,7 @@ class TestPipelineSmoke:
 
     def test_query_returns_answer(self):
         p = _make_pipeline()
-        result = p.query("陈嘉庚创办厦门大学的具体经过是怎样的？")
+        result = p.query("陈嘉庚创办厦门大学的具体经过是怎样的？", history=[])
         assert result["answer"] == "这是mock的最终答案。"
         assert "latency" in result and "total" in result["latency"]
         assert "references" in result

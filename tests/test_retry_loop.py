@@ -58,7 +58,7 @@ def _make_loop_pipeline(max_retry=1, judge_responses=None, rewrite_responses=Non
 def _run(p, question, plan):
     statuses, outcome, latency = [], {}, {}
     for kind, payload in p._retrieval_loop(
-        question, {"low_level_keywords": [], "high_level_keywords": []},
+        question, question, {"low_level_keywords": [], "high_level_keywords": []},
         plan, latency
     ):
         if kind == "status":
