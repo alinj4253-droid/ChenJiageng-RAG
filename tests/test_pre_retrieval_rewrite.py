@@ -73,6 +73,14 @@ def test_pre_rewrite_bad_history_fallback():
 
 def test_pipeline_preserves_original_query(monkeypatch):
     """验证改写后的 query 确实进入了分析和检索链路，但 Judge 和 Generation 仍围绕 original_query"""
+    # Mock 掉重型检索器，避免 RAGPipeline.__init__ 加载真实 FAISS 索引 / sentence-transformers
+    # （CI 环境无 data/vector_store/index.faiss，直连会抛 FileNotFoundError）
+    import src.rag_pipeline as _rp
+    _mock_hybrid = MagicMock()
+    _mock_hybrid.vector_retriever = MagicMock()
+    _mock_hybrid.bm25_retriever = MagicMock()
+    monkeypatch.setattr(_rp, "HybridRetriever", MagicMock(return_value=_mock_hybrid))
+
     # Mock Pipeline 依赖
     pipeline = RAGPipeline(use_graph=False, use_rerank=False, enable_judge=True, enable_routing=False)
     
