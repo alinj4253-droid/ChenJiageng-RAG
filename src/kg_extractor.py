@@ -114,7 +114,8 @@ def extract_from_chunk(chunk: Dict, client=None) -> Optional[Dict]:
     }
 
 
-def run_extraction(limit: Optional[int] = None, resume: bool = True, max_workers: int = 5):
+def run_extraction(limit: Optional[int] = None, resume: bool = True, max_workers: int = 5,
+                   max_consecutive_failures: int = 20):
     """
     批量抽取所有chunk的三元组（并发处理）。
 
@@ -122,6 +123,7 @@ def run_extraction(limit: Optional[int] = None, resume: bool = True, max_workers
         limit: 只处理前N个chunk（测试用）
         resume: 是否断点续传
         max_workers: 并发线程数
+        max_consecutive_failures: 服务持续失败时停止提交实际请求，保留断点
     """
     # 读取chunks
     chunks_file = CHUNKS_DIR / 'chunks.jsonl'
@@ -152,13 +154,30 @@ def run_extraction(limit: Optional[int] = None, resume: bool = True, max_workers
     todo_chunks = [c for c in chunks if c['chunk_id'] not in processed]
     print(f'实际待处理: {len(todo_chunks)} 个')
 
-    stats = {'success': 0, 'failed': 0, 'total_triples': 0}
+    if max_consecutive_failures <= 0:
+        raise ValueError('max_consecutive_failures must be positive')
+    stats = {'success': 0, 'failed': 0, 'total_triples': 0, 'skipped': 0}
     lock = threading.Lock()
     write_lock = threading.Lock()
+    stop_event = threading.Event()
+    consecutive_failures = 0
     start_time = time.time()
+
+    def record_failure():
+        nonlocal consecutive_failures
+        with lock:
+            stats['failed'] += 1
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                stop_event.set()
 
     def process_chunk(chunk):
         """处理单个chunk（线程函数）"""
+        nonlocal consecutive_failures
+        if stop_event.is_set():
+            with lock:
+                stats['skipped'] += 1
+            return False
         client = get_client()  # 每个线程独立客户端，全部模型轮询
         try:
             result = extract_from_chunk(chunk, client)
@@ -169,6 +188,7 @@ def run_extraction(limit: Optional[int] = None, resume: bool = True, max_workers
                         f.write(json.dumps(result, ensure_ascii=False) + '\n')
                 with lock:
                     stats['success'] += 1
+                    consecutive_failures = 0
                     stats['total_triples'] += len(result['triples'])
                     done = stats['success'] + stats['failed']
                     if done % 10 == 0:
@@ -179,13 +199,11 @@ def run_extraction(limit: Optional[int] = None, resume: bool = True, max_workers
                               f'速度={rate:.1f}个/分钟, 预计剩余={eta:.0f}分钟')
                 return True
             else:
-                with lock:
-                    stats['failed'] += 1
+                record_failure()
                 return False
         except Exception as e:
             print(f'  错误 chunk={chunk["chunk_id"]}: {e}')
-            with lock:
-                stats['failed'] += 1
+            record_failure()
             return False
 
     # 并发执行
@@ -198,6 +216,8 @@ def run_extraction(limit: Optional[int] = None, resume: bool = True, max_workers
     print()
     print('=== 抽取完成 ===')
     print(f'成功: {stats["success"]}, 失败: {stats["failed"]}')
+    if stats['skipped']:
+        print(f'服务连续失败，未请求 {stats["skipped"]} 个chunk；恢复服务后重跑可继续')
     print(f'三元组总数: {stats["total_triples"]}')
     print(f'总耗时: {elapsed/60:.1f}分钟, 平均: {elapsed/max(stats["success"]+stats["failed"],1):.1f}秒/个')
     print(f'结果保存: {output_file}')

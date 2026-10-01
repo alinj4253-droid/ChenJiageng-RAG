@@ -9,6 +9,14 @@ import src.llm_client as LLM
 
 class TestChatFallback:
 
+    def setup_method(self):
+        """干净环境下模拟存在 API Key，确保 use_online=True 能进入 online 分支（不依赖本地 .env）"""
+        self._api_key_patcher = patch("src.llm_client.OPENAI_API_KEY", "dummy-test-key")
+        self._api_key_patcher.start()
+
+    def teardown_method(self):
+        self._api_key_patcher.stop()
+
     def test_online_success_returns_result(self):
         """线上成功时直接返回，不调用本地"""
         client = LLM.LLMClient(use_online=True)
@@ -61,6 +69,14 @@ class TestChatFallback:
 
 
 class TestChatStreamFallback:
+
+    def setup_method(self):
+        """与 TestChatFallback 一致：干净环境下模拟 API Key，避免 use_online 被静默关闭"""
+        self._api_key_patcher = patch("src.llm_client.OPENAI_API_KEY", "dummy-test-key")
+        self._api_key_patcher.start()
+
+    def teardown_method(self):
+        self._api_key_patcher.stop()
 
     def test_online_stream_success(self):
         """线上流式成功时返回 token"""

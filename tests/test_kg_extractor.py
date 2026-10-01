@@ -180,3 +180,22 @@ def test_valid_empty_extraction_can_be_resumed():
 def test_unrelated_json_is_not_a_completed_extraction():
     for invalid in [{"error": "failed"}, {"entities": None, "relations": []}, ["unexpected"]]:
         assert extract_from_chunk(_chunk(), _client(invalid)) is None
+
+
+def test_batch_stops_repeated_failures_without_marking_chunks_processed(tmp_path, monkeypatch):
+    import json
+    import src.kg_extractor as extractor
+    monkeypatch.setattr(extractor, "CHUNKS_DIR", tmp_path)
+    monkeypatch.setattr(extractor, "KG_DIR", tmp_path)
+    (tmp_path / "chunks.jsonl").write_text("\n".join(json.dumps(_chunk(str(i))) for i in range(10)))
+    client = _client({})
+    monkeypatch.setattr(extractor, "get_client", lambda: client)
+    stats = extractor.run_extraction(max_workers=1, max_consecutive_failures=3)
+    assert stats["failed"] == 3 and stats["skipped"] == 7
+    assert client.extract_json.call_count == 3
+    assert not (tmp_path / "triples_raw.jsonl").exists()
+
+    client.extract_json.return_value = {"entities": [], "relations": []}
+    stats = extractor.run_extraction(max_workers=1)
+    assert stats["success"] == 10 and stats["failed"] == 0
+    assert len((tmp_path / "triples_raw.jsonl").read_text(encoding="utf-8").splitlines()) == 10
