@@ -13,12 +13,11 @@ CHUNKS_DIR = DATA_DIR / "chunks"
 KG_DIR = DATA_DIR / "kg"
 VECTOR_DIR = DATA_DIR / "vector_store"
 MODELS_DIR = PROJECT_ROOT / "data" / "models"
-TEST_DIR = DATA_DIR / "test"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
 # 确保目录存在
-for d in [CHUNKS_DIR, KG_DIR, VECTOR_DIR, MODELS_DIR, TEST_DIR, OUTPUTS_DIR, LOGS_DIR]:
+for d in [CHUNKS_DIR, KG_DIR, VECTOR_DIR, MODELS_DIR, OUTPUTS_DIR, LOGS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # ============ API 配置 ============
@@ -53,7 +52,6 @@ ALL_ONLINE_MODELS = PREMIUM_MODELS + FAST_MODELS
 # 默认模型选择策略（全部用DeepSeek，质量速度都好）
 DEFAULT_CHAT_MODEL = "deepseek-chat"        # 问答生成
 DEFAULT_EXTRACT_MODEL = "deepseek-chat"     # 三元组抽取
-DEFAULT_EVAL_MODEL = "deepseek-chat"        # 评估
 
 # ============ 切块配置 ============
 CHUNK_TARGET_SIZE = 600       # 目标块大小（字）

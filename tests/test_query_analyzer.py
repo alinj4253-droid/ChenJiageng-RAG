@@ -132,3 +132,8 @@ class TestQueryAnalyzerDegradation:
         for key in ("original_query", "low_level_keywords",
                     "high_level_keywords", "query_mode", "reason"):
             assert key in result, f"缺少字段 {key}"
+
+    def test_prompt_matches_actual_router(self):
+        from src.prompts import QUERY_ANALYSIS_SYSTEM
+        assert "社区检索" not in QUERY_ANALYSIS_SYSTEM
+        assert "实体图检索与关系检索" in QUERY_ANALYSIS_SYSTEM

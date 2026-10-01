@@ -11,7 +11,7 @@ RAG主Pipeline（Workflow-first Agentic RAG）
   → （证据不足且未超上限）Query Rewrite + Bounded Retry
   → 生成答案
 
-Agentic 决策点共三处（其余步骤为确定性代码，保证可控、可测、便于消融）：
+Agentic 决策点共三处（其余步骤为确定性代码，保证可控、可测）：
   1. Query Classification / Routing：LLM 在 QueryAnalyzer 判定 query_mode，
      再由确定性 RetrievalRouter 映射为 RetrievalPlan；
   2. Evidence Sufficiency Judgement：LLM 判断证据是否足以回答原问题；
@@ -56,8 +56,7 @@ class RAGPipeline:
     def __init__(self, use_graph: bool = True, use_rerank: bool = True,
                  enable_routing: Optional[bool] = None,
                  enable_judge: Optional[bool] = None,
-                 max_retry: Optional[int] = None,
-                 fixed_plan: Optional[RetrievalPlan] = None):
+                 max_retry: Optional[int] = None):
         print('初始化RAG Pipeline...')
         self.query_analyzer = QueryAnalyzer()
         self.hybrid_retriever = HybridRetriever()
@@ -75,7 +74,7 @@ class RAGPipeline:
 
         self.generator = RAGGenerator()
 
-        # 证据裁判（Agentic 决策点之二）；可全局/显式关闭用于消融
+        # 证据裁判（Agentic 决策点之二）
         self.enable_evidence_judge = (
             ENABLE_EVIDENCE_JUDGE if enable_judge is None else enable_judge
         )
@@ -85,13 +84,10 @@ class RAGPipeline:
         self.query_rewriter = QueryRewriter() if self.evidence_judge else None
         self.max_retry = MAX_RETRIEVAL_RETRY if max_retry is None else max_retry
 
-        # Agent 路由开关：显式参数优先，否则读全局配置（便于消融 Agent On/Off）
+        # Agent 路由开关：显式参数优先，否则读全局配置
         self.enable_routing = (
             ENABLE_AGENT_ROUTING if enable_routing is None else enable_routing
         )
-
-        # 消融用：强制使用固定检索 Plan（绕过 Router），用于 Dense/+BM25/+KG/+Rerank 组
-        self.fixed_plan = fixed_plan
 
         # 简单查询缓存：相同问题直接返回结果
         self.query_cache = {}
@@ -117,9 +113,7 @@ class RAGPipeline:
         return self.query_analyzer.analyze(question.strip())
 
     def _resolve_plan(self, analysis: Dict) -> RetrievalPlan:
-        """消融固定 Plan 优先；否则按路由开关决定 Router 还是固定 hybrid"""
-        if self.fixed_plan is not None:
-            return self.fixed_plan
+        """按路由开关决定 Router 还是固定 hybrid"""
         if self.enable_routing:
             return build_plan(analysis)
         return build_plan({'query_mode': 'hybrid'})
@@ -229,7 +223,7 @@ class RAGPipeline:
         Retriever 调用次数在 counters 中累加（跨轮次）。
         返回 (reranked, graph_entities, fused)：
           - reranked：精排后最终上下文（FINAL_TOP_K）
-          - fused：精排前融合候选（FUSION_CANDIDATES），供检索 Recall@K 评估
+          - fused：精排前融合候选（FUSION_CANDIDATES）
         """
         latency = latency if latency is not None else {}
 
@@ -252,12 +246,6 @@ class RAGPipeline:
 
         return reranked, graph_entities, fused
 
-    def _judge_evidence(self, question: str, contexts: List[Dict],
-                        plan: RetrievalPlan) -> Optional[EvidenceJudgement]:
-        """按 Plan / 全局开关决定是否做证据裁判；naive 模式不裁判"""
-        if self.evidence_judge is None or not plan.use_evidence_judge:
-            return None
-        return self.evidence_judge.judge(question, contexts)
 
     def _retrieval_loop(self, question: str, analysis: Dict,
                         plan: RetrievalPlan, latency: Dict):
@@ -341,7 +329,7 @@ class RAGPipeline:
             "retrieval_call_detail": dict(retrieval_counters),
         })
 
-    def _prepare_context(self, question: str) -> Tuple[List[Dict], Dict, RetrievalPlan, List[Dict], Dict, Optional[EvidenceJudgement], int, List[Dict]]:
+    def _prepare_context(self, question: str) -> Tuple[List[Dict], Dict, RetrievalPlan, List[Dict], Dict, Optional[EvidenceJudgement], int, List[Dict], int, Dict[str, int]]:
         """查询分析 → 路由 → （检索-裁判-有限重试）循环（非流式路径共用）"""
         latency: Dict[str, float] = {}
 
@@ -408,7 +396,6 @@ class RAGPipeline:
             'query_mode': analysis.get('query_mode'),
             'retrieval_plan': plan.to_dict(),
             'retrieved_chunks': reranked,
-            'retrieval_candidates': candidates,
             'evidence_judgement': judgement.to_dict() if judgement else None,
             'evidence_sufficient': judgement.sufficient if judgement else None,
             'retry_count': retry_count,

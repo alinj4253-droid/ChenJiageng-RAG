@@ -27,7 +27,6 @@ def _make_pipeline(use_graph=True, use_rerank=True, enable_routing=True,
     pipeline.use_graph = use_graph
     pipeline.use_rerank = use_rerank
     pipeline.enable_routing = enable_routing
-    pipeline.fixed_plan = None
     # trace 只组装不落盘，避免测试产生日志文件
     from src.trace_logger import StructuredTraceLogger
     pipeline.tracer = StructuredTraceLogger(enabled=False)
@@ -357,7 +356,7 @@ class TestRetrievalCallCounting:
         ]
         p.query_rewriter.rewrite.return_value = RewrittenQuery(query="改写后")
         # hybrid plan → 每轮 dense+bm25+entity_graph+relation = 4
-        p.fixed_plan = build_plan({"query_mode": "hybrid"})
+        p.query_analyzer.analyze.return_value = {"query_mode": "hybrid"}
 
         result = p.query("陈嘉庚创办厦门大学的经过和背景？")
         assert result["retrieval_rounds"] == 2

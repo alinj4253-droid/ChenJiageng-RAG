@@ -48,7 +48,6 @@ Query Analysis
 | **谨慎生成** | 重试后证据仍不足时，向生成器注入“只依据材料、不编造、无据明说”的约束 |
 | **增量滚动摘要记忆** | 仅对滑出近期窗口（6 条）的旧消息做一次摘要，用 `summarized_until_message_id` 游标保证每条消息只摘要一次，避免重复摘要 |
 | **结构化 Trace** | 每次 query 以 JSONL 记录 query_mode、检索 Plan、候选/精排文档数、证据是否充分、重试次数与各阶段延迟（`logs/rag_trace.jsonl`） |
-| **消融评估** | 一键运行 **7 组递进与策略对比消融**（Dense → +BM25 → +Entity Graph → +Relation → +Rerank → Agent Router → Agent Router+Retry），第一阶段仅评测完整系统的 Recall@10 / F1 / Latency；历史消融入口保留但本轮不执行 |
 | **流式输出** | SSE 打字机效果，后台异步生成，实时推送“检索 / 裁判 / 改写重试”状态 |
 | **引用溯源 / 抗幻觉** | 答案附书名、章节与原文片段；对语料外问题礼貌拒答 |
 
@@ -149,7 +148,7 @@ Query Analysis
 | **对话存储** | SQLite + SQLAlchemy ORM |
 | **前端** | 原生 HTML / JavaScript + vis-network + marked.js + DOMPurify |
 | **流式传输** | SSE（Server-Sent Events） |
-| **测试 / 评估** | pytest（全部 mock，不依赖真实模型/API）；内置 7 组单变量消融脚本 |
+| **测试 / 评估** | pytest（全部 mock，不依赖真实模型/API） |
 
 ---
 
@@ -181,13 +180,6 @@ ChenJiageng-RAG/
 │   ├── neo4j_importer.py       # 三元组批量导入 Neo4j
 │   ├── db.py                   # 会话与消息存储（SQLAlchemy）
 │   ├── prompts.py              # 各类 Prompt 模板
-│   └── evaluator.py            # LLM-as-Judge 评估（可选）
-├── evaluation/                 # 端到端消融评估
-│   ├── datasets/qa_eval.json   # 随仓库分发的 12 题精简评估集
-│   ├── profiles.py             # 7 组单变量消融配置
-│   ├── metrics.py             # 历史指标工具（默认入口仅计算每层一个指标）
-│   ├── run_ablation.py         # 一键消融入口
-│   └── results/                # 消融结果 JSON（运行后生成）
 ├── tests/                      # pytest 测试（LLM/检索全部 mock）
 ├── web/                        # 前端页面（聊天 / 图谱可视化）
 ├── .env.example                # 环境变量模板（复制为 .env 后填写）
@@ -294,46 +286,6 @@ python -m uvicorn src.app:app --host 0.0.0.0 --port 8000
 
 ---
 
-## 📊 第一阶段公开评测
-
-本阶段只使用 **MultiHop-RAG**，在完整官方 609 篇语料上构建独立知识库，
-固定随机种子 42 抽取 100 题，只运行当前完整动态 Pipeline。**不运行 A–G 消融，也不运行 CRUD。**
-历史消融脚本保留供下一阶段使用，不作为本轮入口。
-
-| 层 | 唯一主指标 | 口径 |
-|---|---|---|
-| 检索 | Recall@10 | 最后一次检索的 RRF Top 10 中覆盖多少官方 supporting facts |
-| 生成 | F1 | 规范化英文词元的多重集合重合 F1，按题平均 |
-| 系统 | Avg Latency | 请求进入 Pipeline 至答案完成，seconds/query |
-
-Recall 必须匹配 `evidence_list.fact`，不能仅凭命中来源文章就算命中证据。
-保留独立的 chunk → document/source/evidence 映射文件，不把答案或 supporting facts 注入索引文本。
-无检索目标的 null_query 不计召回均值；其答案仍参与 F1。检索调用数与重试率仅作诊断。
-F1 的具体定义与官方仓库当前脚本的宽松词重合成功率不同，报告会明确区分。
-
-```powershell
-python -m evaluation.download_benchmarks --dataset multihop-rag
-python -m evaluation.prepare_benchmark --dataset evaluation/datasets/public/multihop_rag.json --format multihop-rag --corpus evaluation/datasets/public/multihop_corpus.json --output outputs/benchmarks/multihop-full-100 --limit 100 --seed 42
-$env:RAG_DATA_DIR=(Resolve-Path outputs/benchmarks/multihop-full-100).Path
-python -m src.vector_store
-python -m src.kg_extractor --workers 8
-python -m src.kg_normalizer
-python -m src.kg_indexer
-python -m evaluation.run_benchmark --data-dir outputs/benchmarks/multihop-full-100
-Remove-Item Env:RAG_DATA_DIR
-```
-
-每步成功后再执行下一步；抽取失败重跑同一命令会补齐失败的 chunk。
-准备器拒绝覆盖非空目录，复现实验请换一个新输出目录。
-更多说明见 [数据集准备](evaluation/datasets/README.md)、[第一阶段评测报告](BENCHMARK_EVALUATION.md)
-和 [逐项审查记录](PROJECT_REVIEW.md)。
-
-内置 12 题仅为 **Smoke Test / Domain Case Study**，没有人工 chunk 标注，
-不能证明标准检索效果或模块的稳定收益。旧历史分数不作为当前实现的效果结论。
-
-RRF 权重、裁判提示、上下文选择策略和重试上限暂不调参。
-实际 Top-K：各路召回 → RRF Top 10 → 可选精排 → Top 5 给裁判 → 最多 Top 3/约 1200 字给生成。
-Recall@10 因而衡量融合候选，而不是声称生成器看到了十块证据。
 
 ---
 
@@ -351,8 +303,8 @@ push / Pull Request 到 `main` 时，GitHub Actions 会自动在 ubuntu-latest �
 集成测试请标记 `@pytest.mark.integration`，默认 CI 不运行。
 
 覆盖：查询分析、检索路由、证据裁判、查询改写、有限重试循环（含死循环防护）、
-真实 retrieval_calls 统计、7 组单变量消融 profile、混合检索融合、图谱双向遍历与关系检索、
-增量滚动摘要、会话存储、单轮/流式聊天接口职责、评估指标、trace 落盘等。
+真实 retrieval_calls 统计、混合检索融合、图谱双向遍历与关系检索、
+增量滚动摘要、会话存储、单轮/流式聊天接口职责、trace 落盘等。
 
 ---
 
@@ -360,7 +312,7 @@ push / Pull Request 到 `main` 时，GitHub Actions 会自动在 ubuntu-latest �
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
-| `ENABLE_AGENT_ROUTING` | `True` | 关闭后所有问题走全量 hybrid（用于消融 Agent Router） |
+| `ENABLE_AGENT_ROUTING` | `True` | 关闭后所有问题走全量 hybrid |
 | `ENABLE_EVIDENCE_JUDGE` | `True` | 关闭证据裁判即同时关闭重试 |
 | `MAX_RETRIEVAL_RETRY` | `1` | 证据不足时最多补检次数（构造 Pipeline 时可传 `max_retry=0` 关闭） |
 | `ENABLE_RELATION_RETRIEVAL` | `True` | global/hybrid 模式是否启用关系向量检索 |
@@ -378,7 +330,7 @@ push / Pull Request 到 `main` 时，GitHub Actions 会自动在 ubuntu-latest �
   且裁判始终针对**原始问题**、重试只替换检索 query（保留原分析与 Plan），
   改写结果重复即停，从机制上杜绝无限循环与成本失控。
 - **RetrievalPlan 显式化**：路由输出一个 frozen 的 `RetrievalPlan`（各检索器/精排/
-  裁判开关），检索、融合、裁判都只依赖该 Plan，使消融实验只需替换 Plan 或开关，
+  裁判开关），检索、融合、裁判都只依赖该 Plan，
   无需改业务代码。
 - **任意多路 Weighted RRF**：不写死“三路”，按 Plan 实际启用的检索路数做
   `weight / (k + rank + 1)` 累加融合与去重，naive 模式可只融合 Dense+BM25。

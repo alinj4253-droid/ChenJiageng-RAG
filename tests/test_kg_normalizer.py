@@ -199,3 +199,41 @@ class TestEntityInfoPreservation:
         assert "other_type_count" in stats
         assert stats["entities_with_description"] == 1
         assert stats["description_coverage"] == 0.5
+
+    def test_extraction_description_dedup(self):
+        from unittest.mock import MagicMock
+        from src.kg_extractor import extract_from_chunk
+        client = MagicMock()
+        client.last_model = "mock"
+        client.extract_json.return_value = {
+            "entities": [], "relations": [
+                {"head": "甲方", "tail": "乙方", "relation": "合作"},
+                {"head": "甲方", "tail": "乙方", "relation": "合作", "description": "共同办学"},
+            ]}
+        row = extract_from_chunk({"chunk_id": "c1", "text": "甲方与乙方共同办学"}, client)
+        assert len(row["triples"]) == 1
+        assert row["triples"][0]["description"] == "共同办学"
+        assert client.extract_json.call_args.kwargs["max_tokens"] == 4096
+
+    def test_normalizer_preserves_entity_only_sources_and_fallback(self, tmp_path, monkeypatch):
+        import src.kg_normalizer as N
+        monkeypatch.setattr(N, "KG_DIR", tmp_path)
+        rows = [
+            {"chunk_id": "c1", "entities": [
+                {"name": "嘉庚", "type": "OTHER", "description": "华侨领袖"},
+                {"name": "独立实体", "type": "ORG", "description": "未参与关系"}],
+             "triples": []},
+            {"chunk_id": "c2", "entities": [], "triples": [
+                {"head": "嘉庚", "head_type": "PERSON", "relation": "访问", "tail": "新加坡政府",
+                 "tail_type": "ORG", "description": "交流教育问题"},
+                {"head": "嘉庚", "head_type": "PERSON", "relation": "访问", "tail": "新加坡",
+                 "tail_type": "LOC"}]}]
+        _write_raw(tmp_path, rows)
+        N.normalize_kg()
+        entities = {r["name"]: r for r in _read_jsonl(tmp_path / "entities.jsonl")}
+        assert entities["陈嘉庚"]["type"] == "PERSON"
+        assert entities["陈嘉庚"]["source_chunks"] == ["c1", "c2"]
+        assert entities["独立实体"]["description"] == "未参与关系"
+        assert entities["新加坡"]["type"] == "LOC"
+        assert entities["新加坡政府"]["type"] == "ORG"
+        assert "交流教育问题" in (tmp_path / "triples.jsonl").read_text(encoding="utf-8")

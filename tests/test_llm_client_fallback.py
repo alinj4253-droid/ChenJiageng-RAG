@@ -90,3 +90,11 @@ class TestChatStreamFallback:
             tokens = list(client.chat_stream([{"role": "user", "content": "hi"}]))
             assert tokens == ["本地", "结果"]
             mock_local.assert_called_once()
+
+    def test_json_budget_forwarded(self):
+        from src.llm_client import LLMClient
+        from unittest.mock import MagicMock
+        client = LLMClient(use_online=False)
+        client.chat = MagicMock(return_value='{"ok": true}')
+        assert client.extract_json("prompt", max_tokens=4096) == {"ok": True}
+        assert client.chat.call_args.kwargs["max_tokens"] == 4096

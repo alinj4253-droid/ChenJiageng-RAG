@@ -82,7 +82,6 @@ class TestBoundedRetry:
 
         assert outcome["retry_count"] == 0
         assert outcome["judgement"].sufficient is True
-        # 精排前候选一并透出，供检索 Recall@K 评估
         assert outcome["candidate_count"] == len(outcome["candidates"]) == 1
         p._retrieve_fuse_rerank.assert_called_once()
         p.query_rewriter.rewrite.assert_not_called()

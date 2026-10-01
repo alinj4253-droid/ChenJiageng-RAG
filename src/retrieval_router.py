@@ -5,7 +5,7 @@ Agentic 决策点之一：LLM 在 QueryAnalyzer 中判断 query_mode，
 本模块只负责把 query_mode 确定性地映射为 RetrievalPlan。
 
 刻意不在这里再调用一次 LLM——判断已经在 QueryAnalyzer 完成，
-规则映射保持可解释、可测试、可控、便于消融。
+规则映射保持可解释、可测试、可控。
 """
 from dataclasses import dataclass, asdict
 from typing import Dict, List
@@ -25,7 +25,7 @@ class RetrievalPlan:
         return asdict(self)
 
     def enabled_retrievers(self) -> List[str]:
-        """返回启用的检索器名称（用于日志 / 消融统计）"""
+        """返回启用的检索器名称（用于日志）"""
         names = []
         if self.use_dense:
             names.append("dense")
