@@ -5,7 +5,7 @@
 > **证据不足时的有限查询改写重试**三个关键节点引入 LLM 决策（Workflow-first，
 > 不使用 Multi-Agent / LangGraph 编排）。
 
-[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg)](https://fastapi.tiangolo.com/)
 [![tests](https://github.com/alinj4253-droid/ChenJiageng-RAG/actions/workflows/tests.yml/badge.svg)](https://github.com/alinj4253-droid/ChenJiageng-RAG/actions/workflows/tests.yml)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](#)
@@ -205,7 +205,7 @@ ChenJiageng-RAG/
 
 ### 环境要求
 
-- Python 3.9+
+- Python 3.11+（sentence-transformers 5.x 要求 ≥3.10；CI 固定 3.11）
 - 一个 DeepSeek API Key（或本地 Ollama）
 - Neo4j 5.x（**仅图谱可视化/持久化需要，不影响在线问答**）
 
