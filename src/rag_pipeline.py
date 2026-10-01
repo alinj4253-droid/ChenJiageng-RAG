@@ -28,7 +28,7 @@ from src.reranker import Reranker
 from src.rag_generator import RAGGenerator
 from src.retrieval_router import build_plan, RetrievalPlan
 from src.evidence_judge import EvidenceJudge, EvidenceJudgement
-from src.query_rewriter import QueryRewriter, RewrittenQuery
+from src.query_rewriter import QueryRewriter, RewrittenQuery, PreRetrievalRewriter
 from src.trace_logger import StructuredTraceLogger
 from src.config import (
     FINAL_TOP_K,
@@ -83,6 +83,9 @@ class RAGPipeline:
         # 查询改写器 + 有限重试上限（Agentic 决策点之三）
         self.query_rewriter = QueryRewriter() if self.evidence_judge else None
         self.max_retry = MAX_RETRIEVAL_RETRY if max_retry is None else max_retry
+
+        # 检索前改写器（补全代词和缺失语境）
+        self.pre_retrieval_rewriter = PreRetrievalRewriter()
 
         # Agent 路由开关：显式参数优先，否则读全局配置
         self.enable_routing = (
@@ -247,7 +250,7 @@ class RAGPipeline:
         return reranked, graph_entities, fused
 
 
-    def _retrieval_loop(self, question: str, analysis: Dict,
+    def _retrieval_loop(self, question: str, retrieval_query: str, analysis: Dict,
                         plan: RetrievalPlan, latency: Dict):
         """
         检索 → 证据裁判 → （不足则）有限 Query Rewrite + Retry 的核心循环。
@@ -256,13 +259,14 @@ class RAGPipeline:
             ("status", str)   可供流式接口转发的进度状态
             ("result", dict)  循环结束后的最终结果（仅一次，放在最后）
 
-        - 裁判始终针对用户原始问题；
+        - 裁判始终针对用户原始问题 (question)；
+        - 第一轮检索使用 retrieval_query；
         - 重试保留原 analysis / plan，只替换检索 query；
         - 最多重试 max_retry 次；
         - 改写结果与历史查询重复时立即停止，杜绝死循环。
         """
-        current_query = question
-        previous_queries = {question.strip()}
+        current_query = retrieval_query
+        previous_queries = {retrieval_query.strip(), question.strip()}
         judgement: Optional[EvidenceJudgement] = None
         retry_count = 0
         candidates: List[Dict] = []
@@ -329,17 +333,21 @@ class RAGPipeline:
             "retrieval_call_detail": dict(retrieval_counters),
         })
 
-    def _prepare_context(self, question: str) -> Tuple[List[Dict], Dict, RetrievalPlan, List[Dict], Dict, Optional[EvidenceJudgement], int, List[Dict], int, Dict[str, int]]:
-        """查询分析 → 路由 → （检索-裁判-有限重试）循环（非流式路径共用）"""
+    def _prepare_context(self, question: str, history: Optional[List[Dict]] = None) -> Tuple[List[Dict], Dict, RetrievalPlan, List[Dict], Dict, Optional[EvidenceJudgement], int, List[Dict], int, Dict[str, int]]:
+        """检索前改写 → 查询分析 → 路由 → （检索-裁判-有限重试）循环（非流式路径共用）"""
         latency: Dict[str, float] = {}
 
         t1 = time.time()
-        analysis = self._analyze(question)
+        # 1. 检索前改写（补齐上下文，失败退化为原问题）
+        retrieval_query = self.pre_retrieval_rewriter.rewrite(question, history)
+
+        # 2. 查询分析 + 路由（基于改写后的查询）
+        analysis = self._analyze(retrieval_query)
         plan = self._resolve_plan(analysis)
         latency['query_analysis'] = time.time() - t1
 
         outcome = {}
-        for kind, payload in self._retrieval_loop(question, analysis, plan, latency):
+        for kind, payload in self._retrieval_loop(question, retrieval_query, analysis, plan, latency):
             if kind == "result":
                 outcome = payload
 
@@ -351,7 +359,7 @@ class RAGPipeline:
     # ------------------------------------------------------------------
     # 非流式查询
     # ------------------------------------------------------------------
-    def query(self, question: str, verbose: bool = False) -> Dict:
+    def query(self, question: str, history: Optional[List[Dict]] = None, verbose: bool = False) -> Dict:
         """
         执行完整的RAG问答。
 
@@ -369,7 +377,7 @@ class RAGPipeline:
         t0 = time.time()
         (reranked, analysis, plan, graph_entities, latency,
          judgement, retry_count, candidates,
-         retrieval_calls, retrieval_call_detail) = self._prepare_context(question)
+         retrieval_calls, retrieval_call_detail) = self._prepare_context(question, history)
 
         if verbose:
             print(f'[查询分析] 模式: {analysis.get("query_mode")}')
@@ -438,10 +446,14 @@ class RAGPipeline:
         t0 = time.time()
         latency: Dict[str, float] = {}
 
-        # 1. 查询分析 + 路由
-        yield {"type": "status", "message": "正在理解问题..."}
+        # 0. 检索前改写
+        yield {"type": "status", "message": "正在结合上下文改写问题..."}
         t1 = time.time()
-        analysis = self._analyze(question)
+        retrieval_query = self.pre_retrieval_rewriter.rewrite(question, history)
+
+        # 1. 查询分析 + 路由（基于改写后的查询）
+        yield {"type": "status", "message": "正在理解问题..."}
+        analysis = self._analyze(retrieval_query)
         plan = self._resolve_plan(analysis)
         latency['query_analysis'] = time.time() - t1
 
@@ -453,7 +465,7 @@ class RAGPipeline:
         retry_count = 0
         retrieval_calls = 0
         retrieval_call_detail: Dict[str, int] = {}
-        for kind, payload in self._retrieval_loop(question, analysis, plan, latency):
+        for kind, payload in self._retrieval_loop(question, retrieval_query, analysis, plan, latency):
             if kind == "status":
                 yield {"type": "status", "message": payload}
             elif kind == "result":
