@@ -1,0 +1,33 @@
+ChenJiageng-RAG (嘉庚智答) — Non-Commercial License
+
+Copyright (c) 2025-2026 alinj4253-droid
+
+1. Grant. Permission is hereby granted, free of charge, to any person obtaining
+   a copy of this software and associated documentation files (the "Software"),
+   to use, copy, modify, merge and distribute the Software, subject to ALL of
+   the following conditions:
+
+   a) NON-COMMERCIAL USE ONLY. The Software and its derivatives may NOT be
+      used, sold, or bundled for commercial purposes of any kind without the
+      prior written permission of the copyright holder.
+   b) The above copyright notice and this license text shall be included in
+      all copies or substantial portions of the Software.
+   c) Modifications must be marked as such and distributed under this same
+      license.
+
+2. Third-party content. The Tan Kah Kee (陈嘉庚) literature corpus that this
+   system may index remains the property of its original authors and
+   publishers; this project ships no corpus text and claims no rights over it.
+   Model weights referenced in the documentation (BGE / bge-reranker / etc.)
+   remain under their respective upstream licenses.
+
+3. Disclaimer. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+   KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+   NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+   DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+   OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+   USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+许可说明（中文）：本项目仅供学习与交流使用，禁止任何形式的商业用途；
+授权使用前请联系仓库所有者。陈嘉庚文献语料版权归原作者与出版社所有。
