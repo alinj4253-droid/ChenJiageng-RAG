@@ -1,366 +1,114 @@
-# 嘉庚智答 · 知识图谱增强的 Agentic RAG 系统
+# ChenJiageng-RAG · 嘉庚智答
 
-> 面向陈嘉庚领域文献的 **Knowledge-Graph Enhanced Agentic RAG** 问答系统。
-> 系统以**固定 Workflow** 保证整体执行可控，仅在**检索路由**、**证据充分性裁判**、
-> **证据不足时的有限查询改写重试**三个关键节点引入 LLM 决策（Workflow-first，
-> 不使用 Multi-Agent / LangGraph 编排）。
+**Knowledge-Graph Enhanced Agentic RAG — built from scratch, no framework lock-in.**
 
-[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg)](https://fastapi.tiangolo.com/)
+A question-answering system over the Tan Kah Kee (陈嘉庚) literature corpus (*Nanyang Huiyilu*, collected speeches, etc.) that combines **four-way hybrid retrieval** (dense / BM25 / KG entity / KG relation), **weighted RRF fusion**, **cross-encoder reranking**, and exactly **three LLM decision points** inside a fixed, controllable workflow — producing **citation-grounded, low-hallucination answers** with a full JSONL execution trace.
+
+English | [简体中文](README.zh-CN.md)
+
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg)](https://fastapi.io/)
 [![tests](https://github.com/alinj4253-droid/ChenJiageng-RAG/actions/workflows/tests.yml/badge.svg)](https://github.com/alinj4253-droid/ChenJiageng-RAG/actions/workflows/tests.yml)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](#)
+[![License](https://img.shields.io/badge/License-non--commercial-lightgrey.svg)](LICENSE)
 
----
+<p align="center">
+  <img src="docs/images/pipeline-architecture.png" alt="ChenJiageng-RAG pipeline architecture" width="640">
+</p>
 
-## 📖 项目简介
+## Why workflow-first Agentic RAG?
 
-“嘉庚智答”面向**陈嘉庚文献语料库**（《南侨回忆录》《陈嘉庚言论集》《新中国观感集》等），
-将文献构建为可检索的向量索引、BM25 索引与实体-关系知识图谱，结合多路混合检索、
-Cross-Encoder 精排与三个轻量 Agentic 决策点，提供**有引用、可溯源、低幻觉**的问答服务。
+Multi-agent orchestration is powerful but hard to control and costly to debug. This system takes the opposite bet: **keep the pipeline fixed, and let the LLM decide only where it matters** — three bounded decision points:
 
-核心链路：
+| # | Decision point | What the LLM decides | Guardrail |
+|---|---|---|---|
+| ① | **Retrieval Router** | Classifies the question into `naive / local / global / hybrid` and emits an explicit `RetrievalPlan` | Rule + LLM; disabling it falls back to full hybrid |
+| ② | **Evidence Judge** | Whether retrieved evidence suffices to answer the *original* question | Empty evidence → insufficient without an LLM call; judge failure fails-open |
+| ③ | **Bounded Rewrite & Retry** | Rewrites the retrieval query toward the missing information points | Retry budget = 1; duplicate rewrites stop immediately |
 
-```
-Pre-Retrieval Rewrite（补齐代词/缺失语境，失败回退原问题；Judge 与 Generator 始终围绕原始问题）
-  → Query Analysis（基于改写后 query）
-  → Retrieval Routing（Agentic 决策点 1：按 query_mode 选择检索器组合）
-  → Dense / BM25 / Graph（实体 + 关系）检索
-  → Weighted RRF 融合
-  → Cross-Encoder Rerank
-  → Evidence Judge（Agentic 决策点 2：证据是否足以回答原问题）
-  → （不足且未超上限）Query Rewrite & Bounded Retry（Agentic 决策点 3）
-  → Generation（证据不足时谨慎作答，不编造）
-```
+Everything else — rewrite fallback, RRF fusion weights, reranking, prompt assembly — is deterministic code. Retry budgets and agent switches are all configurable in `src/config.py`.
 
----
+## Highlights
 
-## ✨ 核心特性
+- **4-way hybrid retrieval**: BGE dense (FAISS) + BM25 (jieba) + KG entity retrieval (bidirectional two-hop BFS with weight decay) + KG relation retrieval (relation FAISS index), combined per the router's plan.
+- **Weighted RRF fusion** over any number of active channels, then **bge-reranker-base** cross-encoder reranking.
+- **Citation grounding**: every answer carries book title, chapter and quoted passages; out-of-corpus questions get a polite refusal instead of a guess.
+- **Full observability**: every query appends a JSONL trace — routing decision, candidate/reranked counts, evidence sufficiency, retry count, per-stage latency (`logs/rag_trace.jsonl`).
+- **Incremental rolling-summary memory**: a `summarized_until_message_id` cursor guarantees each old message is summarized exactly once.
+- **SSE streaming** with live pipeline status (retrieving / judging / retrying).
+- **Knowledge graph pipeline**: LLM triple extraction → entity normalization → dual entity/relation FAISS indexes; Neo4j is used for persistence & visualization only — **online QA does not depend on a running Neo4j**.
+- **Fully mocked test suite**: pytest runs with no API key, no model weights, no external services.
 
-| 能力 | 技术实现 |
-|---|---|
-| **Pre-Retrieval Rewrite** | 检索前用 LLM 对用户原问题做轻量级改写（补全代词/缺失语境、规范口语化表达），仅带入最近 4 轮历史；**无 history 仍改写、坏 history 不崩溃、改写失败安全回退原问题**；改写后 query 仅进入分析与检索，**Evidence Judge 与 Generator 始终围绕用户原始问题**，避免答非所问 |
-| **Retrieval Router** | 规则 + LLM 把问题分为 `naive / local / global / hybrid` 四类，输出显式 `RetrievalPlan` 决定启用哪些检索器与是否精排/裁判；**所有非空 Query 都先经 QueryAnalyzer**，不再用”问题长度”做 naive 启发式（长度与难度无可靠对应） |
-| **多路混合检索** | BGE 向量语义检索（FAISS）+ BM25 关键词检索（jieba 分词）+ 知识图谱实体检索，按 Plan 动态组合 |
-| **图谱实体检索** | 实体精确/别名匹配 + 向量匹配，**双向邻接表**两跳权重衰减 BFS 子图扩展（边带 `outgoing/incoming` 方向，不丢失关系语义） |
-| **图谱关系检索** | 对 `global / hybrid` 问题，用 high-level 关键词检索 **relation 向量索引**（FAISS），经三元组 `source_chunks` 召回关系语义证据 |
-| **Weighted RRF 融合** | 任意多路召回用带权 Reciprocal Rank Fusion 去重融合，向量/BM25/图谱权重可配 |
-| **重排精排** | bge-reranker-base Cross-Encoder 对融合候选二次排序 |
-| **Evidence Judge** | 生成前用 LLM 对照原问题裁判证据是否充分、缺哪些信息点；空证据直接判不足且不调用 LLM，裁判失败 fail-open 不阻塞 |
-| **Bounded Query Rewrite + Retry** | 证据不足时按缺失点改写检索 query 并补检，**上限 1 次**；裁判始终针对原始问题；改写结果与历史重复立即停止，杜绝死循环 |
-| **谨慎生成** | 重试后证据仍不足时，向生成器注入“只依据材料、不编造、无据明说”的约束 |
-| **增量滚动摘要记忆** | 仅对滑出近期窗口（6 条）的旧消息做一次摘要，用 `summarized_until_message_id` 游标保证每条消息只摘要一次，避免重复摘要 |
-| **结构化 Trace** | 每次 query 以 JSONL 记录 query_mode、检索 Plan、候选/精排文档数、证据是否充分、重试次数与各阶段延迟（`logs/rag_trace.jsonl`） |
-| **流式输出** | SSE 打字机效果，后台异步生成，实时推送“检索 / 裁判 / 改写重试”状态 |
-| **引用溯源 / 抗幻觉** | 答案附书名、章节与原文片段；对语料外问题礼貌拒答 |
+## Quick Start
 
----
-
-## 🏗️ 系统架构
-
-```
-                          用户提问
-                            │
-                            ▼
-                  ┌───────────────────┐
-                  │ Pre-Retrieval     │  补齐代词/语境，失败回退
-                  │ Rewrite           │  Judge/Generator 仍用原问题
-                  └───────────────────┘
-                            │（改写后 query）
-                            ▼
-                  ┌───────────────────┐
-                  │  Query Analysis   │  所有 Query 经 LLM 判定 query_mode
-                  └───────────────────┘
-                            │
-                            ▼
-              ┌──────────────────────────┐
-              │   Retrieval Router       │  Agentic ①  naive/local/global/hybrid
-              │   → RetrievalPlan        │
-              └──────────────────────────┘
-                            │
-        ┌───────────┬───────┴────────┬──────────────┐
-        ▼           ▼                ▼              ▼
-  ┌──────────┐ ┌────────┐  ┌────────────────┐ ┌──────────────┐
-  │ Dense    │ │ BM25   │  │ Graph 实体     │ │ Graph 关系   │
-  │ BGE+FAISS│ │ jieba  │  │ 双向两跳BFS    │ │ relation索引 │
-  └──────────┘ └────────┘  └────────────────┘ └──────────────┘
-        └───────────┴───────┴────────┴──────────────┘
-                            │
-                            ▼
-                  ┌───────────────────┐
-                  │ Weighted RRF 融合  │  向量0.5/BM25 0.3/图谱0.2
-                  └───────────────────┘
-                            │
-                            ▼
-                  ┌───────────────────┐
-                  │ bge-reranker 精排 │  Cross-Encoder
-                  └───────────────────┘
-                            │
-                            ▼
-              ┌──────────────────────────┐
-              │     Evidence Judge       │  Agentic ② 对照原问题裁判
-              └──────────────────────────┘
-                            │
-        证据不足且未超上限（≤1 次）│ 充分 / 达上限
-                            ▼
-              ┌──────────────────────────┐
-              │ Query Rewrite + 补检     │  Agentic ③（Bounded，防死循环）
-              └──────────────────────────┘
-                            │  （回到融合后再次裁判）
-                            ▼
-                  ┌───────────────────┐
-                  │ Prompt 组装       │  长期摘要 + 近期对话
-                  │ + 不足时谨慎约束  │
-                  └───────────────────┘
-                            │
-                            ▼
-                  ┌───────────────────┐
-                  │ DeepSeek LLM 流式 │  SSE 输出
-                  └───────────────────┘
-                            │
-                            ▼
-                     答案 + 引用来源 + Trace
-```
-
-### 离线索引构建流程
-
-```
-原始文献 (PDF/TXT)
-    │
-    ▼
-文本清洗与解析 → 语义分块 (600字目标, 80字重叠)
-    │
-    ├──► BGE 向量化 ──► FAISS 向量索引
-    │
-    └──► LLM 三元组抽取 ──► 实体归一化
-              ├──► 实体 / 关系 FAISS 索引（在线检索使用）
-              └──► 导入 Neo4j（持久化与可视化）
-```
-
-> ⚠️ **在线问答检索不依赖 Neo4j 在线服务**：在线检索直接读取本地
-> `entities.jsonl / triples.jsonl` 与实体/关系 FAISS 索引在 Python 内存中完成；
-> Neo4j 仅用于图谱持久化存储与 `web/graph.html` 可视化。未启动 Neo4j 不影响问答。
-
----
-
-## 🛠️ 技术栈
-
-| 层次 | 选型 |
-|---|---|
-| **后端框架** | FastAPI + Uvicorn |
-| **向量检索** | FAISS（IndexFlatIP 余弦相似度） |
-| **嵌入模型** | BAAI/bge-base-zh-v1.5（本地加载，进程内 lazy 单例缓存） |
-| **重排模型** | BAAI/bge-reranker-base（本地 Cross-Encoder） |
-| **关键词检索** | BM25 + jieba 中文分词 |
-| **知识图谱** | 实体/关系三元组 + 实体与关系双 FAISS 索引；Neo4j 5.x 仅用于持久化与可视化 |
-| **LLM** | DeepSeek-Chat API（OpenAI 兼容接口，支持 Ollama 降级） |
-| **对话存储** | SQLite + SQLAlchemy ORM |
-| **前端** | 原生 HTML / JavaScript + vis-network + marked.js + DOMPurify |
-| **流式传输** | SSE（Server-Sent Events） |
-| **测试** | pytest（全部 mock，不依赖真实模型/API/Key） |
-
----
-
-## 📁 项目结构
-
-```
-ChenJiageng-RAG/
-├── src/                        # 后端核心代码
-│   ├── app.py                  # FastAPI 主入口（路由 + SSE 流式）
-│   ├── config.py               # 全局配置（路径、模型、超参数、Agent 开关）
-│   ├── rag_pipeline.py         # RAG 主流水线：路由→检索→裁判→有限重试→生成
-│   ├── query_analyzer.py       # 查询分析（关键词 + query_mode）
-│   ├── retrieval_router.py     # 【Agentic ①】检索路由：RetrievalPlan + 规则选路
-│   ├── evidence_judge.py       # 【Agentic ②】证据充分性裁判
-│   ├── query_rewriter.py       # 【检索前改写】PreRetrievalRewriter + 【Agentic ③】证据不足时的 QueryRewriter
-│   ├── memory_manager.py       # 增量滚动摘要（RollingSummaryManager）
-│   ├── trace_logger.py         # 结构化执行 trace（JSONL）
-│   ├── hybrid_retriever.py     # 向量 + BM25 混合检索
-│   ├── vector_store.py         # FAISS 向量索引与检索
-│   ├── bm25_store.py           # BM25 索引与检索
-│   ├── graph_retriever.py      # 图谱实体/关系检索、双向子图扩展
-│   ├── reranker.py             # Cross-Encoder 重排
-│   ├── rag_generator.py        # 答案生成（同步 + 流式，支持谨慎作答）
-│   ├── llm_client.py           # LLM 客户端（DeepSeek / Ollama 降级）
-│   ├── chunker.py              # 文档语义分块
-│   ├── kg_extractor.py         # 知识图谱三元组抽取（支持连续失败熔断）
-│   ├── kg_normalizer.py        # 实体归一化消歧
-│   ├── kg_indexer.py           # 图谱实体/关系向量索引
-│   ├── milvus_migrator.py      # FAISS → Milvus 迁移工具
-│   ├── neo4j_importer.py       # 三元组批量导入 Neo4j
-│   ├── db.py                   # 会话与消息存储（SQLAlchemy）
-│   ├── prompts.py              # 各类 Prompt 模板
-├── tests/                      # pytest 测试（LLM/检索全部 mock）
-├── web/                        # 前端页面（聊天 / 图谱可视化）
-├── .env.example                # 环境变量模板（复制为 .env 后填写）
-├── requirements.txt
-└── README.md
-```
-
-> 📌 `data/models/`、`data/chunks/`、`data/kg/`、`data/vector_store/`、
-> `data/raw/`、`data/clean/`、`logs/`、`.env` 等已通过 `.gitignore` 排除。
-
----
-
-## 🚀 快速开始
-
-### 环境要求
-
-- Python 3.11+（sentence-transformers 5.x 要求 ≥3.10；CI 固定 3.11）
-- 一个 DeepSeek API Key（或本地 Ollama）
-- Neo4j 5.x（**仅图谱可视化/持久化需要，不影响在线问答**）
-
-### 1. 克隆仓库并安装依赖
+Requirements: Python 3.11+, a DeepSeek API key (or local Ollama). Neo4j is optional.
 
 ```bash
+# 1. clone & install
 git clone https://github.com/alinj4253-droid/ChenJiageng-RAG.git
 cd ChenJiageng-RAG
 pip install -r requirements.txt
-```
 
-### 2. 下载本地模型
-
-嵌入与重排模型需手动下载后放入 `data/models/`：
-
-```bash
+# 2. download local embedding / reranker models into data/models/
 huggingface-cli download BAAI/bge-base-zh-v1.5 --local-dir data/models/models/BAAI--bge-base-zh-v1.5/snapshots/master
 huggingface-cli download BAAI/bge-reranker-base --local-dir data/models/models/BAAI--bge-reranker-base/snapshots/master
-```
 
-### 3. 配置环境变量
+# 3. configure
+cp .env.example .env        # then edit: OPENAI_API_BASE / OPENAI_API_KEY (+ Neo4j only for viz)
 
-```bash
-cp .env.example .env   # Windows: copy .env.example .env
-```
+# 4. build indexes from cleaned UTF-8 TXT files in data/clean/
+python -m src.chunker          # semantic chunking (600-char target, 80 overlap)
+python -m src.vector_store     # FAISS vector index
+python -m src.kg_extractor     # LLM triple extraction (with failure circuit-breaker)
+python -m src.kg_normalizer    # entity normalization
+python -m src.kg_indexer       # entity/relation FAISS indexes
+python -m src.neo4j_importer   # optional: Neo4j for visualization only
 
-编辑 `.env`，填入 DeepSeek API Key（Neo4j 仅在需要可视化时填写）：
-
-```env
-OPENAI_API_BASE=https://api.deepseek.com/v1
-OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=your_password
-```
-
-### 4. 准备数据与索引
-
-将原始 PDF、OCR PDF 或 TXT 放入 `data/raw/`。先完成文本提取、OCR 结果整理和清洗，
-统一保存为 UTF-8 TXT 到 `data/clean/`，再运行以下命令。`src.chunker` 只读取
-`data/clean/*.txt`，不会自动解析 `data/raw/` 的 PDF。
-
-```text
-原始 PDF / OCR PDF / TXT → 文本提取 / OCR 结果整理 → UTF-8 TXT
-  → 文本清洗 → data/clean/*.txt → python -m src.chunker
-```
-
-文本提取/OCR/清洗需在仓库外完成；部分 OCR 文本由原始数据直接提供，项目不训练 OCR 模型。
-
-
-
-```bash
-python -m src.chunker          # 文本分块
-python -m src.vector_store     # 向量索引
-python -m src.kg_extractor     # 三元组抽取
-python -m src.kg_normalizer    # 实体归一化
-python -m src.kg_indexer       # 实体/关系向量索引
-python -m src.neo4j_importer   # 导入 Neo4j（可选，仅可视化需要）
-```
-
-### 5. 启动服务
-
-```bash
+# 5. run
 python -m uvicorn src.app:app --host 0.0.0.0 --port 8000
 ```
 
-| 页面 | 地址 |
+| Page | URL |
 |---|---|
-| 聊天问答 | http://localhost:8000 |
-| 知识图谱可视化 | http://localhost:8000/graph |
-| API 文档 | http://localhost:8000/docs |
+| Chat UI | http://localhost:8000 |
+| Graph visualization | http://localhost:8000/graph |
+| API docs | http://localhost:8000/docs |
 
----
+> Raw PDFs must be extracted / OCR'd / cleaned into UTF-8 TXT under `data/clean/` before indexing; the repository does not ship the copyrighted corpus.
 
-## 🔌 主要 API
+## API Overview
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/chat` | **单轮同步** RAG 查询；不维护完整会话记忆（不传 history），返回 session_id、answer、references、latency；完整 trace 由 Pipeline 落盘 |
-| POST | `/api/chat/stream` | **完整多轮聊天主链路（SSE）**：维护 Session 持久化、近期窗口、增量滚动摘要，支持流式 token 输出与状态推送 |
-| GET | `/api/sessions` | 会话列表 |
-| GET | `/api/sessions/{id}/messages` | 会话历史消息 |
-| POST | `/api/sessions` | 新建会话 |
-| DELETE | `/api/sessions/{id}` | 删除会话 |
-| GET | `/api/graph?entity=陈嘉庚` | 获取图谱子图数据 |
-| GET | `/api/health` | 健康检查 |
+| POST | `/api/chat` | Single-turn synchronous RAG query (returns answer, references, latency) |
+| POST | `/api/chat/stream` | **Main multi-turn chat (SSE)**: session persistence, rolling summary, streaming tokens and pipeline status |
+| GET/POST/DELETE | `/api/sessions…` | Session management |
+| GET | `/api/graph?entity=…` | Sub-graph data for visualization |
+| GET | `/api/health` | Health check |
 
----
-
-
----
-
-## ✅ 测试与 CI
-
-所有测试用 mock 隔离 LLM、FAISS、Embedding 与网络，无需 API Key、模型权重或外部服务即可运行：
+## Testing & CI
 
 ```bash
 pip install -r requirements.txt -r requirements-dev.txt
 pytest -q
 ```
 
-push / Pull Request 到 `main` 时，GitHub Actions 会自动在 ubuntu-latest 上安装依赖并运行
-`pytest -q`（见顶部绿色 tests badge 与 `.github/workflows/tests.yml`）。需要真实环境的
-集成测试请标记 `@pytest.mark.integration`，默认 CI 不运行。
+All LLM/FAISS/embedding/network dependencies are mocked. GitHub Actions runs `pytest -q` on every push/PR to `main` (see the tests badge). Integration tests requiring a real environment are marked `@pytest.mark.integration` and skipped in CI.
 
-覆盖：检索前改写（无 history 仍改写、坏 history 安全处理、Judge/Generator 保留 original query）、查询分析、检索路由、证据裁判、查询改写、有限重试循环（含死循环防护）、
-真实 retrieval_calls 统计、混合检索融合、图谱双向遍历与关系检索、
-增量滚动摘要、会话存储、单轮/流式聊天接口职责、trace 落盘、LLM 在线/本地降级（干净环境无 API Key 亦可通过）等。
+## Project Structure
 
----
+```
+src/    23 modules: app, rag_pipeline, retrieval_router, evidence_judge,
+        query_rewriter, memory_manager, hybrid_retriever, graph_retriever,
+        reranker, kg_extractor, kg_normalizer, kg_indexer, trace_logger, ...
+tests/  pytest suite (fully mocked)
+web/    chat page + knowledge-graph visualization (vis-network)
+docs/   architecture diagrams
+```
 
-## ⚙️ Agent 相关配置（`src/config.py`）
+Key configuration switches (defaults in `src/config.py`): `ENABLE_AGENT_ROUTING`, `ENABLE_EVIDENCE_JUDGE`, `MAX_RETRIEVAL_RETRY=1`, `ENABLE_RELATION_RETRIEVAL`, `ENABLE_TRACE_LOG`, RRF weights, memory window.
 
-| 配置 | 默认 | 说明 |
-|---|---|---|
-| `ENABLE_AGENT_ROUTING` | `True` | 关闭后所有问题走全量 hybrid |
-| `ENABLE_EVIDENCE_JUDGE` | `True` | 关闭证据裁判即同时关闭重试 |
-| `MAX_RETRIEVAL_RETRY` | `1` | 证据不足时最多补检次数（构造 Pipeline 时可传 `max_retry=0` 关闭） |
-| `ENABLE_RELATION_RETRIEVAL` | `True` | global/hybrid 模式是否启用关系向量检索 |
-| `ENABLE_TRACE_LOG` | `True` | 是否写结构化 trace 到 `logs/rag_trace.jsonl` |
-| `RECENT_WINDOW` | `6` | 对话短期记忆窗口（消息条数），app/generator/db 统一从这里读取 |
-| `ENTITY_GRAPH_WEIGHT` | `0.2` | 实体图谱检索在 Weighted RRF 中的权重 |
-| `RELATION_GRAPH_WEIGHT` | `0.2` | 关系向量检索在 Weighted RRF 中的权重（独立于实体图谱权重） |
+## License
 
----
+Non-commercial — see [LICENSE](LICENSE). This project is for study and research only; commercial use is not permitted. Copyright of the Tan Kah Kee literature belongs to its original authors and publishers.
 
-## 🧠 关键技术点说明
-
-- **Workflow-first 的三个 Agentic 决策点**：不引入多 Agent 编排，只在路由、证据裁判、
-  有限重试三处让 LLM 做决策，其余步骤固定可控。重试有严格上界（默认 1 次），
-  且裁判始终针对**原始问题**、重试只替换检索 query（保留原分析与 Plan），
-  改写结果重复即停，从机制上杜绝无限循环与成本失控。
-- **Pre-Retrieval Rewrite 与原始问题隔离**：检索前对用户口语化/指代不清的问题做一次
-  轻量改写（补全代词、规范表达），改写后 query 仅送入 QueryAnalyzer 与 Retriever；
-  Evidence Judge 与 Generator 始终接收用户**原始问题**，避免"改写后问题"漂移导致
-  答非所问。改写器对空 history、损坏 history、LLM 异常/空输出均安全回退原问题。
-- **RetrievalPlan 显式化**：路由输出一个 frozen 的 `RetrievalPlan`（各检索器/精排/
-  裁判开关），检索、融合、裁判都只依赖该 Plan，
-  无需改业务代码。
-- **任意多路 Weighted RRF**：不写死“三路”，按 Plan 实际启用的检索路数做
-  `weight / (k + rank + 1)` 累加融合与去重，naive 模式可只融合 Dense+BM25。
-- **双向知识图谱 + 关系索引真正生效**：邻接表同时建 `head→tail(outgoing)` 与
-  `tail→head(incoming)`，两跳 BFS 可沿任意方向遍历且保留关系方向；
-  high-level 抽象问题检索关系 FAISS 索引并经三元组 `source_chunks` 取 chunk，
-  让 QueryAnalyzer 的两类关键词（low/high level）各自对应实体与关系检索。
-- **增量滚动摘要**：Session 表用 `summarized_until_message_id` 游标记录摘要进度，
-  每轮只对“已过游标且滑出近期窗口”的旧消息摘要一次并推进游标，修复了旧实现
-  “每轮重复摘要全部历史”的冗余与首条消息无法生成标题的问题。
-- **工程可观测**：每次 query 的路由决策、候选/精排文档数、证据充分性、重试次数与
-  分阶段延迟以 JSONL 落盘，便于离线统计重试率/延迟分布与 Debug。
-
----
-
-## 📝 License
-
-本项目仅供学习与交流使用，请勿用于商业用途。文献版权归原作者与出版社所有。
-
-
+中文介绍与完整配置说明见 [README.zh-CN.md](README.zh-CN.md)。
